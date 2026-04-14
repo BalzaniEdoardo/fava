@@ -11,10 +11,12 @@ from multiprocessing import Process, Queue
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 import threading
+from typing import TypeAlias
 
 import sys
 
 import numpy as np
+from numpy.typing import NDArray
 
 try:
     from decord import VideoReader
@@ -32,6 +34,11 @@ if sys.platform == "win32":
     mp_ctx = multiprocessing.get_context("spawn")
 else:
     mp_ctx = multiprocessing.get_context("fork")
+
+
+UInt8Array: TypeAlias = NDArray[np.uint8]
+TupleYUV: TypeAlias = tuple[UInt8Array, UInt8Array, UInt8Array]
+FutureArray: TypeAlias = Future[UInt8Array] | Future[TupleYUV]
 
 
 class AsyncVideoReader:
@@ -66,7 +73,7 @@ class AsyncVideoReader:
         self._buffer_lock = mp_ctx.Lock()
 
         self._pending_rid: int = 0
-        self._pending_future: Future | None = None
+        self._pending_future: FutureArray | None = None
         self._lock = threading.Lock()
 
         self._result = np.ndarray((1, *frame0.shape), dtype=self.dtype, buffer=self._shm.buf)
@@ -117,7 +124,7 @@ class AsyncVideoReader:
 
             future.set_result(frame_copy)
 
-    def __getitem__(self, index) -> Future:
+    def __getitem__(self, index) -> FutureArray:
         with self._lock:
             if self._pending_future is not None and not self._pending_future.done():
                 self._pending_future.cancel()
@@ -125,8 +132,6 @@ class AsyncVideoReader:
                 self._cancel_event.set()
 
             self._pending_rid += 1
-            # a trick to get the resultant shape of the sliced array with a zero-memory dummy array
-            final_shape = np.empty(shape=self.shape, dtype="V0")[index[0]].shape
             future = Future()
             self._pending_future = future
 

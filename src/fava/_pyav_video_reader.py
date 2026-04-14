@@ -20,7 +20,6 @@ except ImportError:
 import numpy as np
 
 from numpy.typing import NDArray
-from dataclasses import dataclass
 
 
 
@@ -81,7 +80,7 @@ class BaseAudioVideo:
 
 
     def close(self):
-        """Close the audiovideo stream."""
+        """Close the audio-video stream."""
         self._running = False
         threads = ["_index_thread", "_keyframe_thread"]
         for thread_name in threads:

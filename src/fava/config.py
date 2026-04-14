@@ -25,8 +25,8 @@ class Config:
 
         Parameters
         ----------
-        root_folder : str or Path, optional
-            The root folder path for datasets.
+        backend :
+            The video reader backend.
         """
         if not backend in ["decord", "av"]:
             raise ValueError("backend must be 'decord', or 'av' for decord "

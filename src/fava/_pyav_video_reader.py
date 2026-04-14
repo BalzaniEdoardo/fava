@@ -22,6 +22,33 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+def pyav_trim_plane(
+    plane, bytes_per_pixel: cython.uint = 1, dtype: str = "uint8"
+):
+    """
+    Adapted from pyav
+
+    Return the useful part of the VideoPlane as a strided array.
+
+    We are simply creating a view that discards any padding which was added for
+    alignment.
+    """
+    import numpy as np
+
+    dtype_obj = np.dtype(dtype)
+    total_line_size = abs(plane.line_size)
+    itemsize = dtype_obj.itemsize
+    channels = bytes_per_pixel // itemsize
+
+    if channels == 1:
+        shape = (plane.height, plane.width)
+        strides = (total_line_size, itemsize)
+    else:
+        shape = (plane.height, plane.width, channels)
+        strides = (total_line_size, bytes_per_pixel, itemsize)
+
+    return np.ndarray(shape, dtype=dtype_obj, buffer=plane, strides=strides)
+
 
 class BaseAudioVideo:
     _thread_local = threading.local()

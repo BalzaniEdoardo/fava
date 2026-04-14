@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fava"
+version = "0.1.0"
+description = "Fast Asyc Video Array: async video reader with fast random frame access."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Kushal Kolar" },
+    { name = "Edoardo Balzani" },
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "av",
+]
+
+[project.optional-dependencies]
+decord = ["decord2"]  # you wish it was that easy!
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["fava"]

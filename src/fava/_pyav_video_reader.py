@@ -133,7 +133,7 @@ class VideoHandler(BaseAudioVideo):
 
     Examples
     --------
-    >>> from pynaviz.audiovideo import VideoHandler
+    >>> from fava import VideoHandler
     >>> vh = VideoHandler("example.mp4")  # doctest: +SKIP
     >>> # Get the frame at 1.5 seconds.
     >>> frame = vh.get(1.5)  # doctest: +SKIP
@@ -154,7 +154,7 @@ class VideoHandler(BaseAudioVideo):
         video_path: str | pathlib.Path,
         stream_index: int = 0,
         time: Optional[NDArray] = None,
-        pixel_format: Literal["rgb24", "yuv420p"] | None = "rgb24",
+        pixel_format: Literal["rgb24", "yuv420p", "yuv444p"] | None = "rgb24",
     ) -> None:
         super().__init__(video_path)
         self.stream = self.container.streams.video[stream_index]

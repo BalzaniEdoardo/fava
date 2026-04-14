@@ -11,7 +11,7 @@ from multiprocessing import Process, Queue
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 import threading
-from typing import TypeAlias
+from typing import TypeAlias, Literal
 
 import sys
 
@@ -24,7 +24,6 @@ except ImportError:
     VideoReader = None
 
 from ._pyav_video_reader import VideoHandler
-from .config import config
 from ._vr_process import _reader_process
 
 # fork clones the parent process directly — no re-import of the main script,
@@ -35,7 +34,6 @@ if sys.platform == "win32":
 else:
     mp_ctx = multiprocessing.get_context("fork")
 
-
 UInt8Array: TypeAlias = NDArray[np.uint8]
 TupleYUV: TypeAlias = tuple[UInt8Array, UInt8Array, UInt8Array]
 FutureArray: TypeAlias = Future[UInt8Array] | Future[TupleYUV]
@@ -45,19 +43,30 @@ class AsyncVideoReader:
     def __array__(self) -> AsyncVideoReader:
         return self
 
-    def __init__(self, path: str | Path, **kwargs):
+    def __init__(
+        self,
+        path: str | Path,
+        backend: Literal["decord", "av"] = "av",
+        colorspace: Literal["rgb24", "yuv420p", "yuv444p"] = "rgb24",
+        **kwargs,
+    ):
         self._path = Path(path)
         self._kwargs = kwargs
 
-        if config.backend == "decord":
+        if backend == "decord":
             vr = VideoReader(str(self._path), num_threads=1)
             frame0 = vr[10].asnumpy()
             vr.seek(0)
+            self._shape = (len(vr), *frame0.shape)
+            self._colorspace = "rgb24"  # decord doesn't have an option to output yuv
         else:
-            vr = VideoHandler(self._path, pixel_format="rgb24")
+            vr = VideoHandler(self._path, pixel_format=colorspace)
             frame0 = vr[0]
+            self._shape = vr.shape
+            self._colorspace = colorspace
+            if colorspace == "rgb24":
+                self._shape = (*self._shape, 3)
 
-        self._shape = (len(vr), *frame0.shape)
         self._dtype = np.dtype(frame0.dtype)
         if hasattr(vr, "close"):
             vr.close()
@@ -76,7 +85,9 @@ class AsyncVideoReader:
         self._pending_future: FutureArray | None = None
         self._lock = threading.Lock()
 
-        self._result = np.ndarray((1, *frame0.shape), dtype=self.dtype, buffer=self._shm.buf)
+        self._result = np.ndarray(
+            (1, *frame0.shape), dtype=self.dtype, buffer=self._shm.buf
+        )
 
         self._worker = mp_ctx.Process(
             target=_reader_process,
@@ -99,6 +110,22 @@ class AsyncVideoReader:
         self._listener = threading.Thread(target=self._listen, daemon=True)
         self._listener.start()
 
+    @property
+    def colorspace(self) -> Literal["rgb24", "yuv420p", "yuv444p"]:
+        return self._colorspace
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._dtype
+
+    @property
+    def ndim(self) -> int:
+        return len(self._shape)
+
     def _listen(self):
         while True:
             msg = self._response_queue.get()
@@ -115,7 +142,9 @@ class AsyncVideoReader:
                     self._shm.unlink()
                     self._shm.close()
                     self._shm = SharedMemory(name=shm_name)
-                    self._result = np.ndarray(frame_shape, dtype=np.dtype(dtype), buffer=self._shm.buf)
+                    self._result = np.ndarray(
+                        frame_shape, dtype=np.dtype(dtype), buffer=self._shm.buf
+                    )
 
                 future = self._pending_future
 
@@ -147,15 +176,3 @@ class AsyncVideoReader:
             self._listener.join()
         self._shm.unlink()
         self._shm.close()
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return self._shape
-
-    @property
-    def dtype(self) -> np.dtype:
-        return self._dtype
-
-    @property
-    def ndim(self) -> int:
-        return len(self._shape)

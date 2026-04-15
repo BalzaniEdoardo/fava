@@ -227,6 +227,10 @@ class VideoHandler(BaseAudioVideo):
     ) -> None:
         super().__init__(video_path)
         self._buffer = FrameBuffer(maxsize=buffer_size)
+        # pts of the last frame *actually decoded* from the stream — used for
+        # seek decisions.  current_frame can be updated by buffer / cache hits
+        # without advancing the stream, so it must not be used for this purpose.
+        self._stream_pts: int | None = None
         self.stream = self.container.streams.video[stream_index]
         self.stream_index = stream_index
         self.pixel_format = pixel_format
@@ -624,9 +628,7 @@ class VideoHandler(BaseAudioVideo):
 
         target_pts, use_time = self._get_target_frame_pts(idx)
 
-        if not hasattr(self.current_frame, "pts") or self._need_seek_call(
-            self.current_frame.pts, target_pts
-        ):
+        if self._stream_pts is None or self._need_seek_call(self._stream_pts, target_pts):
             self.container.seek(
                 int(target_pts), backward=True, any_frame=False, stream=self.stream
             )
@@ -637,6 +639,7 @@ class VideoHandler(BaseAudioVideo):
         if preceding_frame is not None:
             self.last_loaded_idx = idx
             self.current_frame = preceding_frame
+            self._stream_pts = preceding_frame.pts
             self._buffer.put(idx, preceding_frame)
 
         return (
@@ -919,8 +922,8 @@ class VideoHandler(BaseAudioVideo):
             if (stop - start) // step > 1:
                 target_pts, use_time = self._get_target_frame_pts(start)
 
-                if not hasattr(self.current_frame, "pts") or self._need_seek_call(
-                    self.current_frame.pts, target_pts
+                if self._stream_pts is None or self._need_seek_call(
+                    self._stream_pts, target_pts
                 ):
                     self.container.seek(
                         int(target_pts), backward=True, any_frame=False, stream=self.stream
@@ -933,6 +936,7 @@ class VideoHandler(BaseAudioVideo):
                 if len(frames):
                     self.last_loaded_idx = frame_idx
                     self.current_frame = last_frame
+                    self._stream_pts = last_frame.pts
                 frames = frames if not revert else frames[::-1]
                 if spatial_idx is not None and isinstance(frames, np.ndarray):
                     frames = frames[(slice(None), *spatial_idx)]

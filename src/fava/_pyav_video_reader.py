@@ -809,77 +809,63 @@ class VideoHandler(BaseAudioVideo):
             self.get(0)
 
         preceding_frame = self.current_frame
-        last_frame = self.current_frame  # safe fallback if no packet yields frames
-        go_to_next_packet = False
+        last_frame = self.current_frame
+        decoder = None  # frame-level iterator; reset after every seek
 
         while collected < num_frames:
-            if not go_to_next_packet:
-                target_pts, use_time = self._get_target_frame_pts(indices[collected])
+            target_pts, use_time = self._get_target_frame_pts(indices[collected])
 
-            # First frame shortcut
+            # First-frame shortcut: the already-decoded current frame is the target.
             if collected == 0 and hasattr(self.current_frame, "pts"):
                 if self.current_frame.pts == target_pts:
                     self._append_frame(frames, collected, self.current_frame)
                     collected = 1
                     continue
                 elif self.current_frame.pts > target_pts:
+                    # Current position overshoots — seek back and open a fresh decoder.
+                    # Invalidate preceding_frame so the seek-check below doesn't
+                    # trigger a redundant second seek.
                     self.current_frame = None
+                    preceding_frame = None
                     self.container.seek(
-                        int(target_pts),
-                        backward=True,
-                        any_frame=False,
-                        stream=self.stream,
+                        int(target_pts), backward=True, any_frame=False, stream=self.stream
                     )
-                    go_to_next_packet = True
+                    decoder = self.container.decode(self.stream)
 
-            if not go_to_next_packet and self._need_seek_call(preceding_frame.pts, target_pts):
+            # Open a decoder (or re-open after a seek) when needed.
+            if decoder is None or (
+                preceding_frame is not None
+                and self._need_seek_call(preceding_frame.pts, target_pts)
+            ):
                 self.container.seek(
-                    int(target_pts),
-                    backward=True,
-                    any_frame=False,
-                    stream=self.stream,
+                    int(target_pts), backward=True, any_frame=False, stream=self.stream
                 )
+                decoder = self.container.decode(self.stream)
 
-            # Advance through packets until we get at least one decoded frame.
-            # B-frame codecs (e.g. libx265) buffer several packets before
-            # emitting output, so some packets legitimately produce 0 frames.
-            # Retrying the same packet never helps — we must feed the next one.
-            decoded = []
+            # Advance one frame. container.decode handles B-frame buffering
+            # internally, so zero-frame packets are transparent to us.
             try:
-                while not decoded:
-                    packet = next(self.container.demux(self.stream))
-                    decoded = list(packet.decode())
-            except (av.error.EOFError, StopIteration):
-                # end of the video
+                frame = next(f for f in decoder if f.pts is not None)
+            except StopIteration:
                 break
 
-            for frame in decoded:
-                if frame.pts is None:
-                    continue
+            time_threshold = time_threshold_all[collected]
+            found_next = (
+                (frame.pts > target_pts) if not use_time else (frame.time > time_threshold)
+            )
+            found_current = (
+                (frame.pts == target_pts) if not use_time else (frame.time == time_threshold)
+            )
 
-                time_threshold = time_threshold_all[collected]
-                found_next = (
-                    (frame.pts > target_pts) if not use_time else (frame.time > time_threshold)
-                )
-                found_current = (
-                    (frame.pts == target_pts) if not use_time else (frame.time == time_threshold)
-                )
+            if found_next:
+                self._append_frame(frames, collected, preceding_frame or frame)
+                collected += 1
+            elif found_current:
+                self._append_frame(frames, collected, frame)
+                collected += 1
 
-                if found_next:
-                    self._append_frame(frames, collected, preceding_frame)
-                    collected += 1
-                    go_to_next_packet = False
-
-                elif found_current:
-                    self._append_frame(frames, collected, frame)
-                    collected += 1
-                    go_to_next_packet = False
-
-                else:
-                    go_to_next_packet = True
-
-                last_frame = frame
-                preceding_frame = frame
+            last_frame = frame
+            preceding_frame = frame
 
         return indices[-1], frames, last_frame
 

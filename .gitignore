@@ -208,3 +208,6 @@ __marimo__/
 
 # generated videos
 tests/test_video/
+
+# Pycharm
+.idea/

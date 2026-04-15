@@ -5,6 +5,7 @@ Handles opening/closing the stream, seeking, and keyframe extraction.
 """
 from __future__ import annotations
 import abc
+from collections import deque
 
 import pathlib
 import threading
@@ -24,6 +25,42 @@ from numpy.typing import NDArray
 # Number of packets to buffer before flushing to the index for codecs without
 # B-frames (where packet PTS are already in display order).
 _INDEX_FLUSH_EVERY = 64
+
+
+class FrameBuffer:
+    """Fixed-size FIFO cache mapping frame index → raw av.VideoFrame.
+
+    Frames are stored in their native pixel format; conversion happens on
+    retrieval, matching the existing behaviour of VideoHandler.
+
+    Parameters
+    ----------
+    maxsize :
+        Maximum number of frames to keep. When full the oldest-inserted
+        entry is evicted before adding a new one.
+    """
+
+    def __init__(self, maxsize: int = 30) -> None:
+        self._maxsize = maxsize
+        self._cache: dict[int, av.VideoFrame] = {}
+        self._order: deque[int] = deque()
+
+    def get(self, idx: int) -> av.VideoFrame | None:
+        """Return the cached frame for *idx*, or ``None`` on a miss."""
+        return self._cache.get(idx)
+
+    def put(self, idx: int, frame: av.VideoFrame) -> None:
+        """Insert *frame* under *idx*, evicting the oldest entry if full."""
+        if idx in self._cache:
+            return
+        if len(self._cache) == self._maxsize:
+            evict = self._order.popleft()
+            del self._cache[evict]
+        self._cache[idx] = frame
+        self._order.append(idx)
+
+    def __contains__(self, idx: int) -> bool:
+        return idx in self._cache
 
 
 def _needs_flush(count_keyframes: int, temp: list, has_b_frames: bool , n_b_frames: int = 1) -> bool:
@@ -157,6 +194,10 @@ class VideoHandler(BaseAudioVideo):
         PyAV pixel format string for decoded frames. Supported values are
         ``"rgb24"`` (default) and ``"yuv420p"``. Pass ``None`` to skip
         conversion and return raw `av.VideoFrame` instances.
+    buffer_size :
+        Number of recently decoded frames to keep in the FIFO frame buffer.
+        On a cache hit the frame is returned without any seeking or decoding.
+        Default is 30 (roughly 1 s at 30 fps).
 
     Examples
     --------
@@ -182,8 +223,10 @@ class VideoHandler(BaseAudioVideo):
         stream_index: int = 0,
         time: Optional[NDArray] = None,
         pixel_format: Literal["rgb24", "yuv420p"] | None = None,
+        buffer_size: int = 30,
     ) -> None:
         super().__init__(video_path)
+        self._buffer = FrameBuffer(maxsize=buffer_size)
         self.stream = self.container.streams.video[stream_index]
         self.stream_index = stream_index
         self.pixel_format = pixel_format
@@ -569,6 +612,16 @@ class VideoHandler(BaseAudioVideo):
                 else self.current_frame
             )
 
+        cached = self._buffer.get(idx)
+        if cached is not None:
+            self.current_frame = cached
+            self.last_loaded_idx = idx
+            return (
+                cached.to_ndarray(format=self.pixel_format)
+                if self.pixel_format is not None
+                else cached
+            )
+
         target_pts, use_time = self._get_target_frame_pts(idx)
 
         if not hasattr(self.current_frame, "pts") or self._need_seek_call(
@@ -584,6 +637,7 @@ class VideoHandler(BaseAudioVideo):
         if preceding_frame is not None:
             self.last_loaded_idx = idx
             self.current_frame = preceding_frame
+            self._buffer.put(idx, preceding_frame)
 
         return (
             self.current_frame.to_ndarray(format=self.pixel_format)

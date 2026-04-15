@@ -111,3 +111,79 @@ def test_pts_ordering(video_info):
         video._wait_for_index(15)
         np.testing.assert_array_equal(video.all_pts, np.sort(video.all_pts))
         np.testing.assert_array_equal(video.all_pts, np.asarray(frame_pts, dtype=video.all_pts.dtype))
+
+
+# ---------------------------------------------------------------------------
+# Buffer integration tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_get_populates_buffer(video_info):
+    """A frame decoded via get() should land in the buffer."""
+    _, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        video.get(5.0)
+        idx = VideoHandler._ts_to_index(5.0, video.time)
+        assert idx in video._buffer
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_get_hits_buffer_on_second_call(video_info):
+    """Second get() for the same timestamp must return the cached frame
+    without re-decoding — proved by closing the container between calls."""
+    _, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        first = video.get(5.0)
+
+        # Close the underlying container so any attempt to decode would raise.
+        video.container.close()
+        video.container = None
+
+        # Should succeed from the buffer, not touch the container.
+        second = video.get(5.0)
+
+    assert first.pts == second.pts
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_getitem_int_populates_buffer(video_info):
+    """video[idx] (integer index) routes through get(), so the frame should
+    end up in the buffer."""
+    _, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        idx = 10
+        video[idx]
+        assert idx in video._buffer
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_getitem_int_hits_buffer_on_second_call(video_info):
+    """video[idx] called twice: second call must come from the buffer."""
+    _, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        idx = 10
+        first = video[idx]
+
+        video.container.close()
+        video.container = None
+
+        second = video[idx]
+
+    assert first.pts == second.pts
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_buffer_fifo_eviction_in_handler(video_info):
+    """Accessing more than buffer_size distinct frames evicts the earliest one."""
+    _, _, _, video_path = video_info
+    buf_size = 5
+    with VideoHandler(video_path, time=np.arange(100), buffer_size=buf_size) as video:
+        # warm up: access buf_size + 1 distinct frames (skip 0; __init__ decodes it)
+        for i in range(1, buf_size + 2):
+            video[i]
+
+        # frame at index 1 was inserted first and should have been evicted
+        assert 1 not in video._buffer
+        # the most recent buf_size frames must still be present
+        for i in range(2, buf_size + 2):
+            assert i in video._buffer

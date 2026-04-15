@@ -12,18 +12,15 @@ import time
 import warnings
 from contextlib import contextmanager
 from typing import Callable, List, Literal, Optional, Tuple
-try:
-    import av
-except ImportError:
-    av = None
 
+import av
 import numpy as np
 
 from numpy.typing import NDArray
 
 
 def pyav_trim_plane(
-    plane, bytes_per_pixel: cython.uint = 1, dtype: str = "uint8"
+        plane, bytes_per_pixel=1, dtype="uint8"
 ):
     """
     Adapted from pyav
@@ -33,7 +30,6 @@ def pyav_trim_plane(
     We are simply creating a view that discards any padding which was added for
     alignment.
     """
-    import numpy as np
 
     dtype_obj = np.dtype(dtype)
     total_line_size = abs(plane.line_size)
@@ -54,8 +50,8 @@ class BaseAudioVideo:
     _thread_local = threading.local()
 
     def __init__(
-        self,
-        path: str | pathlib.Path,
+            self,
+            path: str | pathlib.Path,
     ) -> None:
         self._thread_local.get_from_index = False
         self.file_path = pathlib.Path(path)
@@ -104,7 +100,6 @@ class BaseAudioVideo:
         # then seek forward if there is a future keyframe closest
         # to the target.
         return closest_keyframe_pts > current_frame_pts
-
 
     def close(self):
         """Close the audio-video stream."""
@@ -177,17 +172,16 @@ class VideoHandler(BaseAudioVideo):
     _thread_local = threading.local()
 
     def __init__(
-        self,
-        video_path: str | pathlib.Path,
-        stream_index: int = 0,
-        time: Optional[NDArray] = None,
-        pixel_format: Literal["rgb24", "yuv420p", "yuv444p"] | None = "rgb24",
+            self,
+            video_path: str | pathlib.Path,
+            stream_index: int = 0,
+            time: Optional[NDArray] = None,
+            pixel_format: Literal["rgb24", "yuv420p", "yuv444p"] | None = "rgb24",
     ) -> None:
         super().__init__(video_path)
         self.stream = self.container.streams.video[stream_index]
         self.stream_index = stream_index
         self.pixel_format = pixel_format
-
 
         # default to linspace
         # TODO : what if number of frames is 0.
@@ -259,7 +253,7 @@ class VideoHandler(BaseAudioVideo):
         return np.clip(idx, 0, len(time) - 1)
 
     def _extract_keyframe_times_and_points(
-        self, video_path: str | pathlib.Path, stream_index: int = 0, first_only=False
+            self, video_path: str | pathlib.Path, stream_index: int = 0, first_only=False
     ) -> Tuple[NDArray, NDArray] | None:
         """
         Extract the indices and timestamps of keyframes from a video file.
@@ -570,7 +564,7 @@ class VideoHandler(BaseAudioVideo):
         target_pts, use_time = self._get_target_frame_pts(idx)
 
         if not hasattr(self.current_frame, "pts") or self._need_seek_call(
-            self.current_frame.pts, target_pts
+                self.current_frame.pts, target_pts
         ):
             self.container.seek(
                 int(target_pts), backward=True, any_frame=False, stream=self.stream
@@ -623,13 +617,13 @@ class VideoHandler(BaseAudioVideo):
             if frame.pts is None:
                 continue
             if (not use_time and frame.pts > target_pts) or (
-                use_time and frame.time > time_threshold
+                    use_time and frame.time > time_threshold
             ):
                 last_idx = idx
                 current_frame = preceding_frame or frame
                 return last_idx, current_frame
             elif (not use_time and frame.pts == target_pts) or (
-                use_time and frame.time == time_threshold
+                    use_time and frame.time == time_threshold
             ):
                 last_idx = idx
                 current_frame = frame
@@ -650,7 +644,7 @@ class VideoHandler(BaseAudioVideo):
           emitted until indexing is complete.
         """
         if (
-            self._time_provided
+                self._time_provided
         ):  # TODO maybe check what is the actual number of frames decoded and throw a warning
             return len(self.time), self.stream.width, self.stream.height
         has_frames = hasattr(self.stream, "frames") and self.stream.frames > 0
@@ -658,7 +652,7 @@ class VideoHandler(BaseAudioVideo):
         if not has_frames and not is_done_unpacking:
             warnings.warn(
                 message="Video ``shape``, which corresponds to the number of frames, is being "
-                "calculated runtime and will be updated.",
+                        "calculated runtime and will be updated.",
                 stacklevel=2,
             )
         with self._lock:
@@ -697,7 +691,7 @@ class VideoHandler(BaseAudioVideo):
             if not has_frames and not is_done_unpacking:
                 warnings.warn(
                     message="Video ``shape``, which corresponds to the number of frames, is being "
-                    "calculated runtime and will be updated.",
+                            "calculated runtime and will be updated.",
                     stacklevel=2,
                 )
             return self.time
@@ -738,12 +732,12 @@ class VideoHandler(BaseAudioVideo):
             frames.append(frame)
 
     def _decode_multiple(
-        self,
-        target_pts,
-        idx_start: int,
-        idx_end: int,
-        step: int = 1,
-    ) -> Tuple[int, List[av.VideoFrame| NDArray], av.VideoFrame]:
+            self,
+            target_pts,
+            idx_start: int,
+            idx_end: int,
+            step: int = 1,
+    ) -> Tuple[int, List[av.VideoFrame | NDArray], av.VideoFrame]:
         effective_end = min(idx_end, self.shape[0])
         indices = np.arange(idx_start, effective_end, step)
         num_frames = len(indices)
@@ -836,8 +830,8 @@ class VideoHandler(BaseAudioVideo):
         return indices[-1], frames, last_frame
 
     def __getitem__(
-        self,
-        idx: int | slice | Tuple[int | slice, *Tuple[slice, ...]],
+            self,
+            idx: int | slice | Tuple[int | slice, Tuple[slice, ...]],
     ) -> NDArray | av.VideoFrame | List[av.VideoFrame]:
         """
         Get item for video frame.
@@ -898,7 +892,7 @@ class VideoHandler(BaseAudioVideo):
                 target_pts, use_time = self._get_target_frame_pts(start)
 
                 if not hasattr(self.current_frame, "pts") or self._need_seek_call(
-                    self.current_frame.pts, target_pts
+                        self.current_frame.pts, target_pts
                 ):
                     self.container.seek(
                         int(target_pts), backward=True, any_frame=False, stream=self.stream

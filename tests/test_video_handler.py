@@ -204,10 +204,42 @@ def test_getitem_slice_matches_expected(video_info, start, stop, step):
     frame_array, _, _, video = video_info
     video = pathlib.Path(video)
     with VideoHandler(video) as video_obj:
-        video_obj.return_frame_array = False
         frames = np.stack([f.to_ndarray() for f in video_obj[start:stop:step]])
         # make sure the video meta-info about time are fully computed
         video_obj._wait_for_index(timeout=15)
         np.testing.assert_array_equal(
             frame_array[start:stop:step], frames
         )
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_getitem_decoupled_current_frame_and_pts_decoding_via_get(video_info):
+    frame_array, _, _, video = video_info
+    video = pathlib.Path(video)
+    with VideoHandler(video) as video_obj:
+        # this populates the buffer
+        _ = video_obj[10]
+        _ = video_obj[11]
+        # move backwards current frame (pick from buffer, should not move decoder head)
+        _ = video_obj[10]
+        # make sure the pts of stream is different
+        assert video_obj.current_frame.pts != video_obj._stream_pts
+        # make sure that
+        frame = video_obj[12]
+        np.testing.assert_array_equal(frame_array[12], frame.to_ndarray())
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_getitem_decoupled_current_frame_and_pts_decoding_via_decode_multiple(video_info):
+    frame_array, _, _, video = video_info
+    video = pathlib.Path(video)
+    with VideoHandler(video) as video_obj:
+        # this populates the buffer
+        _ = video_obj[10:12]
+        # move backwards current frame (pick from buffer, should not move decoder head)
+        _ = video_obj[10]
+        # make sure the pts of stream is different
+        assert video_obj.current_frame.pts != video_obj._stream_pts
+        # make sure that
+        frames = video_obj[12:14]
+        frames = np.stack([f.to_ndarray() for f in frames])
+        np.testing.assert_array_equal(frame_array[12:14], frames)

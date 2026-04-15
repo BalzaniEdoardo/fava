@@ -62,6 +62,12 @@ class FrameBuffer:
     def __contains__(self, idx: int) -> bool:
         return idx in self._cache
 
+    def __repr__(self):
+        if len(self._cache) <= 1:
+            return "".join(["FrameBuffer("] + [f"{k}: {v}" for k,v in self._cache.items()] + [")"])
+        return "".join(["FrameBuffer(\n"] + [f"\t{k}: {v}\n" for k,v in self._cache.items()] + ["}"])
+
+
 
 def _needs_flush(count_keyframes: int, temp: list, has_b_frames: bool , n_b_frames: int = 1) -> bool:
     """True when the buffered GOP / batch is ready to commit to the index.
@@ -804,29 +810,20 @@ class VideoHandler(BaseAudioVideo):
         decoder = None  # frame-level iterator; reset after every seek
 
         while collected < num_frames:
-            target_pts, use_time = self._get_target_frame_pts(indices[collected])
+            # out-of-cache frame
+            cached = self._buffer.get(indices[collected])
+            if cached is not None:
+                self.current_frame = cached
+                self.last_loaded_idx = indices[collected]
+                self._append_frame(frames, collected, cached)
+                collected += 1
+                continue
 
-            # First-frame shortcut: the already-decoded current frame is the target.
-            if collected == 0 and hasattr(self.current_frame, "pts"):
-                if self.current_frame.pts == target_pts:
-                    self._append_frame(frames, collected, self.current_frame)
-                    collected = 1
-                    continue
-                elif self.current_frame.pts > target_pts:
-                    # Current position overshoots — seek back and open a fresh decoder.
-                    # Invalidate preceding_frame so the seek-check below doesn't
-                    # trigger a redundant second seek.
-                    self.current_frame = None
-                    preceding_frame = None
-                    self.container.seek(
-                        int(target_pts), backward=True, any_frame=False, stream=self.stream
-                    )
-                    decoder = self.container.decode(self.stream)
+            target_pts, use_time = self._get_target_frame_pts(indices[collected])
 
             # Open a decoder (or re-open after a seek) when needed.
             if decoder is None or (
-                preceding_frame is not None
-                and self._need_seek_call(preceding_frame.pts, target_pts)
+                self._need_seek_call(self._stream_pts, target_pts)
             ):
                 self.container.seek(
                     int(target_pts), backward=True, any_frame=False, stream=self.stream
@@ -837,6 +834,8 @@ class VideoHandler(BaseAudioVideo):
             # internally, so zero-frame packets are transparent to us.
             try:
                 frame = next(f for f in decoder if f.pts is not None)
+                self._buffer.put(self._get_frame_idx(frame.pts)[0] - 1, frame)
+                self._stream_pts = frame.pts
             except StopIteration:
                 break
 
@@ -849,7 +848,8 @@ class VideoHandler(BaseAudioVideo):
             )
 
             if found_next:
-                self._append_frame(frames, collected, preceding_frame or frame)
+                frame = preceding_frame or frame
+                self._append_frame(frames, collected, frame)
                 collected += 1
             elif found_current:
                 self._append_frame(frames, collected, frame)

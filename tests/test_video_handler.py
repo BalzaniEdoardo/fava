@@ -187,3 +187,27 @@ def test_buffer_fifo_eviction_in_handler(video_info):
         # the most recent buf_size frames must still be present
         for i in range(2, buf_size + 2):
             assert i in video._buffer
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+@pytest.mark.parametrize(
+    "start, stop, step",
+    [
+        (0, 5, 1),
+        (10, 20, 2),
+        (95, 100, 1),
+        (99, 100, 1),
+        (0, 100, 25),
+    ],
+)
+def test_getitem_slice_matches_expected(video_info, start, stop, step):
+    frame_array, _, _, video = video_info
+    video = pathlib.Path(video)
+    with VideoHandler(video) as video_obj:
+        video_obj.return_frame_array = False
+        frames = np.stack([f.to_ndarray() for f in video_obj[start:stop:step]])
+        # make sure the video meta-info about time are fully computed
+        video_obj._wait_for_index(timeout=15)
+        np.testing.assert_array_equal(
+            frame_array[start:stop:step], frames
+        )

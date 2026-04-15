@@ -20,7 +20,11 @@ dependencies = [
 
 [project.optional-dependencies]
 decord = ["decord2"]  # you wish it was that easy!
-dev = ["pytest"]
+dev = [
+    "pytest",
+    "nox",
+    "ruff",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

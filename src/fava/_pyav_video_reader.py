@@ -26,10 +26,22 @@ from numpy.typing import NDArray
 _INDEX_FLUSH_EVERY = 64
 
 
-def _needs_flush(packet, temp: list, has_b_frames: bool) -> bool:
-    """True when the buffered GOP / batch is ready to commit to the index."""
+def _needs_flush(count_keyframes: int, temp: list, has_b_frames: bool , n_b_frames: int = 1) -> bool:
+    """True when the buffered GOP / batch is ready to commit to the index.
+
+    Parameters
+    ----------
+    count_keyframes :
+        Number of keyframe in a frame block.
+    temp :
+        A list of extracted pts.
+    has_b_frames:
+        True if the codec has B-frames.
+    n_b_frames:
+        Number of B-frames.
+    """
     if has_b_frames:
-        return packet.is_keyframe and bool(temp)
+        return (count_keyframes == n_b_frames) and bool(temp)
     return len(temp) >= _INDEX_FLUSH_EVERY
 
 
@@ -330,6 +342,7 @@ class VideoHandler(BaseAudioVideo):
                 stream = container.streams.video[self.stream_index]
                 n_frames = stream.frames
                 has_b_frames = bool(stream.codec_context.has_b_frames)
+                max_b_frames = stream.codec_context.max_b_frames
                 process = sorted if has_b_frames else lambda x: x
                 temp = []
                 # setup config for fixed-size and variable size index.
@@ -353,13 +366,17 @@ class VideoHandler(BaseAudioVideo):
                         extracted_pts.clear()
 
                 # extraction loop: do not decode but sort and trim if needed.
+                count_key_frames = 0
                 for packet in container.demux(stream):
                     if not self._running:
                         return
                     if packet.pts is None or packet.pts < 0:
                         continue
-                    if _needs_flush(packet, temp, has_b_frames):
+
+                    count_key_frames += packet.is_keyframe
+                    if _needs_flush(count_key_frames, temp, has_b_frames, max_b_frames):
                         update(temp)
+                        count_key_frames = 0
                     temp.append(packet.pts)
 
                 if temp:

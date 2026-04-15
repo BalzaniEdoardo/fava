@@ -16,7 +16,7 @@ CODEC_EXTENSION_COMBOS = [
     pytest.param(("libx264", "mkv"), id="libx264_mkv"),
     pytest.param(("mpeg4", "avi"),   id="mpeg4_avi"),
     pytest.param(("vp9", "webm"),    id="vp9_webm"),
-    pytest.param(("libx265", "mp4"), id="libx265_mp4", marks=_SKIP_UNSORTED_PTS),
+    pytest.param(("libx265", "mp4"), id="libx265_mp4"),
 ]
 
 
@@ -102,3 +102,11 @@ def test_video_shape(video_info):
         idx = 7
         frame = video[idx].to_ndarray(format="rgb24")
         assert frame.shape == (video.shape[2], video.shape[1], 3)
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_pts_ordering(video_info):
+    # pts from full decoding
+    _, frame_pts, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        video._wait_for_index(15)
+        np.testing.assert_array_equal(video.all_pts, np.asarray(frame_pts, dtype=video.all_pts.dtype))

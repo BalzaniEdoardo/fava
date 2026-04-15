@@ -7,7 +7,7 @@ os.environ["DECORD_EOF_RETRY_MAX"] = "128"
 
 from concurrent.futures import Future
 import multiprocessing
-from multiprocessing import Process, Queue
+from multiprocessing import Queue
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 import threading

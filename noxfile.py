@@ -1,0 +1,72 @@
+import os
+import pathlib
+
+import nox
+
+
+@nox.session(name="linters", reuse_venv=True)
+def linters(session):
+    """Run linters"""
+    session.install("-e", ".[dev]")
+    session.run("ruff", "check", "src", "--ignore", "D")
+    session.run("ruff", "check", "tests", "--ignore", "D")
+
+@nox.session(name="linters-fix", reuse_venv=True)
+def linters_fix(session):
+    """Run linters and auto-fix issues"""
+    session.install("-e", ".[dev]")
+    session.run("ruff", "check", "src", "--ignore", "D", "--fix")
+    session.run("ruff", "check", "tests", "--ignore", "D", "--fix")
+
+@nox.session(name="tests", reuse_venv=True)
+def tests(session):
+    """Run the test suite."""
+    # session.log("install")
+    session.install("-e", ".[dev]", external=True)
+    # session.run("pip", "list")
+    tests_path = pathlib.Path(__file__).parent.resolve() / "tests"
+
+    # generate sample videos
+    video_dir = tests_path / "test_video"
+    video_dir.mkdir(exist_ok=True)
+    generated_video = [
+        f"numbered_video_{codec}.{ext}"
+        for codec, ext in [
+            ("mpeg4", "mp4"),
+            ("libx264", "mp4"),
+            ("libx264", "mkv"),
+            ("mpeg4", "avi"),
+            ("vp9", "webm"),
+            ("libx265", "mp4"),
+        ]
+    ]
+    is_in_dir = all((video_dir / name).exists() for name in generated_video)
+    session.log(f"video found {is_in_dir}")
+    if not is_in_dir:
+        session.log("Generating numbered videos...")
+        session.run(
+            "python",
+            f"{video_dir.parent / 'generate_numbered_video.py'}"
+        )
+
+    session.log("Run Tests...")
+    session.run(
+        "pytest",
+        env={
+            "WGPU_FORCE_OFFSCREEN": "1",
+        }
+    )
+
+    if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
+        # CI environment - use xvfb
+        session.run(
+            "pytest",  # Start pytest directly, no "run" or "-m"
+            "--cov=src/fava",
+            "--cov-report=xml",
+            "--cov-report=term",
+            "-v",
+            "tests/",
+            external=True,
+        )
+    else:
+        session.run("pytest -v tests/")

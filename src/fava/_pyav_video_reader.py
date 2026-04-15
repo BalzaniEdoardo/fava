@@ -11,7 +11,7 @@ import threading
 import time
 import warnings
 from contextlib import contextmanager
-from typing import Callable, List, Literal, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 try:
     import av
 except ImportError:

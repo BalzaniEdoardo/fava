@@ -28,7 +28,7 @@ class Config:
         backend :
             The video reader backend.
         """
-        if not backend in ["decord", "av"]:
+        if backend not in ["decord", "av"]:
             raise ValueError("backend must be 'decord', or 'av' for decord "
                              "or pyav respectively.")
         self._backend = backend

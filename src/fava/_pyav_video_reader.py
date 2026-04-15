@@ -21,6 +21,16 @@ import numpy as np
 
 from numpy.typing import NDArray
 
+# Number of packets to buffer before flushing to the index for codecs without
+# B-frames (where packet PTS are already in display order).
+_INDEX_FLUSH_EVERY = 64
+
+
+def _needs_flush(packet, temp: list, has_b_frames: bool) -> bool:
+    """True when the buffered GOP / batch is ready to commit to the index."""
+    if has_b_frames:
+        return packet.is_keyframe and bool(temp)
+    return len(temp) >= _INDEX_FLUSH_EVERY
 
 
 class BaseAudioVideo:
@@ -133,7 +143,7 @@ class VideoHandler(BaseAudioVideo):
 
     Examples
     --------
-    >>> from pynaviz.audiovideo import VideoHandler
+    >>> from fava import VideoHandler
     >>> vh = VideoHandler("example.mp4")  # doctest: +SKIP
     >>> # Get the frame at 1.5 seconds.
     >>> frame = vh.get(1.5)  # doctest: +SKIP
@@ -190,15 +200,12 @@ class VideoHandler(BaseAudioVideo):
             self.round_fn = lambda x: x
 
         # These will be initialized in the thread once n_frames is known
-        self.all_pts = None
+        self.all_pts: np.ndarray | list = []
         self.all_times = None
         self.key_mask = None
 
-        self._i = 0  # write position
-        if self.stream.frames and self.stream.frames > 0:
-            self._index_thread = threading.Thread(target=self._build_index_fixed_size, daemon=True)
-        else:
-            self._index_thread = threading.Thread(target=self._build_index_dynamic, daemon=True)
+        self._i = 0  # number of committed (valid) PTS entries
+        self._index_thread = threading.Thread(target=self._build_index, daemon=True)
 
         self._index_ready = threading.Event()
         self._index_thread.start()
@@ -317,55 +324,101 @@ class VideoHandler(BaseAudioVideo):
         finally:
             self._pts_keyframe_ready.set()
 
-    def _build_index_fixed_size(self):
+    def _build_index(self):
         try:
             with av.open(self.file_path) as container:
                 stream = container.streams.video[self.stream_index]
                 n_frames = stream.frames
+                has_b_frames = bool(stream.codec_context.has_b_frames)
+                process = sorted if has_b_frames else lambda x: x
+                temp = []
+                # setup config for fixed-size and variable size index.
+                if n_frames > 0:
+                    # preallocate indices
+                    with self._lock:
+                        self.all_pts = np.empty(n_frames, dtype=np.int64)
 
-                if not n_frames or n_frames <= 0:
-                    raise ValueError("Cannot determine total number of frames in stream.")
+                    def update(extracted_pts):
+                        chunk = process(extracted_pts)
+                        with self._lock:
+                            self.all_pts[self._i: self._i + len(chunk)] = chunk
+                            self._i += len(chunk)
+                        extracted_pts.clear()
+                        extracted_pts.append(packet.pts)
+                        return extracted_pts
+                else:
+                    def update(extracted_pts):
+                        chunk = process(extracted_pts)
+                        with self._lock:
+                            self.all_pts.extend(chunk)
+                            self._i = len(self.all_pts)
+                        extracted_pts.clear()
+                        extracted_pts.append(packet.pts)
+                        return extracted_pts
 
-                self.all_pts = np.empty(n_frames, dtype=np.int64)
-                self._i = 0  # Number of valid entries
-
+                # extraction loop: do not decode but sort and trim if needed.
                 for packet in container.demux(stream):
                     if not self._running:
                         return
-                    for frame in packet.decode():
-                        if self._i >= n_frames:
-                            break
-                        with self._lock:
-                            self.all_pts[self._i] = frame.pts
-                            self._i += 1
+                    if packet.pts is None or packet.pts < 0:
+                        continue
+                    if _needs_flush(packet, temp, has_b_frames):
+                        temp = update(temp)
+
+                if temp:
+                    update(temp)
+                with self._lock:
+                    self.all_pts = np.asarray(self.all_pts[: self._i], dtype=np.int64)
+
         except Exception as e:
             print("Index thread error:", e)
         finally:
             self._index_ready.set()
 
-    def _build_index_dynamic(self):
-        try:
-            with av.open(self.file_path) as container:
-                if not self._running:
-                    return
-                stream = container.streams.video[self.stream_index]
-                pts_list = []
-
-                current_index = 0
-                flush_every = 10  # number of frames over which flushing to all points
-                for packet in container.demux(stream):
-                    for frame in packet.decode():
-                        if frame.pts is not None:
-                            pts_list.append(frame.pts)
-                            if current_index % flush_every == 1:
-                                with self._lock:
-                                    self.all_pts = pts_list
-                                    self._i = current_index
-                            current_index += 1
-        except Exception as e:
-            print("Index thread error:", e)
-        finally:
-            self._index_ready.set()
+    # def _build_index(self):
+    #     try:
+    #         with av.open(self.file_path) as container:
+    #             stream = container.streams.video[self.stream_index]
+    #             has_b_frames = bool(stream.codec_context.has_b_frames)
+    #             process = sorted if has_b_frames else lambda x: x
+    #             pts_list = []
+    #             temp = []
+    #
+    #             for packet in container.demux(stream):
+    #                 if not self._running:
+    #                     return
+    #                 if packet.pts is None or packet.pts < 0:
+    #                     continue
+    #                 if has_b_frames:
+    #                     if packet.is_keyframe and temp:
+    #                         chunk = process(temp)
+    #                         with self._lock:
+    #                             pts_list.extend(chunk)
+    #                             self._i = len(pts_list)
+    #                         temp.clear()
+    #                     temp.append(packet.pts)
+    #                 else:
+    #                     temp.append(packet.pts)
+    #                     if len(temp) >= _INDEX_FLUSH_EVERY:
+    #                         chunk = process(temp)
+    #                         with self._lock:
+    #                             pts_list.extend(chunk)
+    #                             self._i = len(pts_list)
+    #                         temp.clear()
+    #
+    #             if temp:
+    #                 chunk = process(temp)
+    #                 with self._lock:
+    #                     pts_list.extend(chunk)
+    #                     self._i = len(pts_list)
+    #
+    #             with self._lock:
+    #                 self.all_pts = np.array(pts_list, dtype=np.int64)
+    #
+    #     except Exception as e:
+    #         print("Index thread error:", e)
+    #     finally:
+    #         self._index_ready.set()
 
     def _get_frame_idx(self, pts: int) -> int:
         """
@@ -387,10 +440,10 @@ class VideoHandler(BaseAudioVideo):
         # Wait until enough index is available
         # Estimate pts from index (using filled index if available)
         with self._lock:
-            done = self.all_pts[min(self._i, len(self.all_pts) - 1)] > pts
+            done = self._i > 0 and self.all_pts[self._i - 1] > pts
         if done:
             # the pts for this timestamp has been filled
-            idx = np.searchsorted(self.all_pts, pts, side="right")
+            idx = np.searchsorted(self.all_pts[: self._i], pts, side="right")
             use_time = False
         else:
             # keep going until at least two frames have been decoded by the thread

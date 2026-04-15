@@ -164,7 +164,7 @@ class VideoHandler(BaseAudioVideo):
         video_path: str | pathlib.Path,
         stream_index: int = 0,
         time: Optional[NDArray] = None,
-        pixel_format: Literal["rgb24", "yuv420p"] | None = "rgb24",
+        pixel_format: Literal["rgb24", "yuv420p"] | None = None,
     ) -> None:
         super().__init__(video_path)
         self.stream = self.container.streams.video[stream_index]
@@ -344,8 +344,6 @@ class VideoHandler(BaseAudioVideo):
                             self.all_pts[self._i: self._i + len(chunk)] = chunk
                             self._i += len(chunk)
                         extracted_pts.clear()
-                        extracted_pts.append(packet.pts)
-                        return extracted_pts
                 else:
                     def update(extracted_pts):
                         chunk = process(extracted_pts)
@@ -353,8 +351,6 @@ class VideoHandler(BaseAudioVideo):
                             self.all_pts.extend(chunk)
                             self._i = len(self.all_pts)
                         extracted_pts.clear()
-                        extracted_pts.append(packet.pts)
-                        return extracted_pts
 
                 # extraction loop: do not decode but sort and trim if needed.
                 for packet in container.demux(stream):
@@ -363,7 +359,8 @@ class VideoHandler(BaseAudioVideo):
                     if packet.pts is None or packet.pts < 0:
                         continue
                     if _needs_flush(packet, temp, has_b_frames):
-                        temp = update(temp)
+                        update(temp)
+                    temp.append(packet.pts)
 
                 if temp:
                     update(temp)

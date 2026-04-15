@@ -1,0 +1,103 @@
+import pathlib
+
+import av
+import numpy as np
+import pytest
+
+from fava import VideoHandler
+
+
+@pytest.fixture()
+def video_info(request):
+    extension = request.param
+    video = pathlib.Path(__file__).parent / f"test_video/numbered_video.{extension}"
+
+    frame_pts = []
+    keyframe_pts = []
+    frame_array = []
+    with av.open(video) as container:
+        stream = container.streams.video[0]
+        stream.codec_context.skip_frame = "NONE"  # decode all frames
+
+        for frame in container.decode(stream):
+            frame_pts.append(frame.pts)
+            frame_array.append(frame.to_ndarray())
+            if frame.key_frame:
+                keyframe_pts.append(frame.pts)
+
+    return np.stack(frame_array), frame_pts, keyframe_pts, video
+
+
+@pytest.mark.parametrize("video_info", ["mp4", "mkv", "avi"], indirect=True)
+@pytest.mark.parametrize(
+    "requested_frame_ts, expected_frame_id",
+    [(0, 0), (0.1, 0), (1.0, 1), (1.1, 1), (1.6, 1), (99, 99), (99.6, 99), (111, 99)],
+)
+def test_video_handler(video_info, requested_frame_ts, expected_frame_id):
+    _, frame_pts_ref, _, video = video_info
+    with VideoHandler(
+            video, time=np.arange(100)
+        ) as handler:
+        frame = handler.get(requested_frame_ts)
+        expected_pts = frame_pts_ref[expected_frame_id]
+        assert frame.pts == expected_pts
+
+
+
+@pytest.mark.parametrize("video_info", ["mp4", "mkv", "avi"], indirect=True)
+def test_getitem_single_index_return_frame(video_info):
+    frame_array, _, _, video_path = video_info
+    with VideoHandler(
+            video_path, time=np.arange(100)
+        ) as video:
+        idx = 7
+        frame = video[idx]
+        assert isinstance(frame, av.VideoFrame), "Single frame should be a single frame"
+        np.testing.assert_array_equal(frame.to_ndarray(), frame_array[idx])
+
+
+@pytest.mark.parametrize(
+    "start, stop, step",
+    [
+        (0, 5, 1),  # simple forward slice
+        (10, 20, 2),  # skip frames
+        (25, None, 3),  # slice to end with step
+        (None, 10, 1),  # from beginning
+        (None, None, 5),  # full range with step
+    ],
+)
+@pytest.mark.parametrize("video_info", ["mp4", "mkv", "avi"], indirect=True)
+def test_getitem_slice_return_frame(video_info, start, stop, step):
+    frame_array, _, _, video_path = video_info
+    with VideoHandler(
+            video_path, time=np.arange(100)
+        ) as video:
+        idx = slice(start, stop, step)
+        frames = video[idx]
+
+        # Compute expected length
+        start_idx = start or 0
+        stop_idx = stop if stop is not None else video.shape[0]
+        step_val = step or 1
+        expected_len = len(range(start_idx, stop_idx, step_val))
+
+        assert isinstance(frames, list), "Sliced result should be a list of frames"
+        assert all(isinstance(f, av.VideoFrame) for f in frames), "Sliced result should be a list of av.VideoFrame"
+        assert (
+            len(frames) == expected_len
+        ), f"Expected {expected_len} frames but got {len(frames)}"
+        frame_array_handler = np.stack([f.to_ndarray() for f in frames])
+        np.testing.assert_array_equal(frame_array_handler, frame_array[slice(start, stop, step)])
+
+
+@pytest.mark.parametrize("video_info", ["mp4", "mkv", "avi"], indirect=True)
+def test_video_shape(video_info):
+    _, _, _, video_path = video_info
+    with VideoHandler(
+            video_path, time=np.arange(100),
+        ) as video:
+        idx = 7
+        frame = video[idx].to_ndarray(format="rgb24")
+        assert frame.shape == (video.shape[2], video.shape[1], 3)
+
+

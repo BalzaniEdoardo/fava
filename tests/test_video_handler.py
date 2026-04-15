@@ -109,4 +109,5 @@ def test_pts_ordering(video_info):
     _, frame_pts, _, video_path = video_info
     with VideoHandler(video_path, time=np.arange(100)) as video:
         video._wait_for_index(15)
+        np.testing.assert_array_equal(video.all_pts, np.sort(video.all_pts))
         np.testing.assert_array_equal(video.all_pts, np.asarray(frame_pts, dtype=video.all_pts.dtype))

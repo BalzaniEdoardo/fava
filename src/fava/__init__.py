@@ -1,3 +1,2 @@
-from .config import config
 from .vr_async import AsyncVideoReader
-from ._pyav_video_reader import VideoHandler
+from ._pyav_video_reader import VideoHandler, pyav_trim_plane

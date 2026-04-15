@@ -1,48 +1,38 @@
-import os
 import queue
-
-# decord uses up all the RAM otherwise
-os.environ["DECORD_EOF_RETRY_MAX"] = "128"
-
 from multiprocessing import Queue, Event, Lock
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 
+import av
 import numpy as np
+
+from ._pyav_video_reader import VideoHandler, pyav_trim_plane
+from .utils import SharedMemYUV, SharedMemRGB, Colorspace, create_buffers
 
 
 def _reader_process(
-    path: Path,
-    kwargs: dict,
-    shm_name: str,
-    frame_shape: tuple,
-    dtype: str,
-    request_queue: Queue,
-    response_queue: Queue,
-    stop_event: Event,
-    cancel_event: Event,
-    buffer_lock: Lock,
+        path: Path,
+        shared_mem_names: str,
+        colorspace: Colorspace,
+        shape_frame: tuple[int, int],
+        shape_chroma: tuple[int, int] | None,
+        request_queue: Queue,
+        response_queue: Queue,
+        stop_event: Event,
+        cancel_event: Event,
+        buffer_lock: Lock,
 ):
-    import os
-    from . import config
+    vr = VideoHandler(path, pixel_format=None)
 
-    if config.backend == "decord":
-        from decord import VideoReader, gpu
+    shared_mems: SharedMemRGB | SharedMemYUV = tuple(SharedMemory(name=n) for n in shared_mem_names)
 
-        os.environ["DECORD_EOF_RETRY_MAX"] = "128"
-        vr = VideoReader(str(path), ctx=gpu(0))
-        as_numpy = lambda frame: frame.asnumpy()
-        as_numpy(vr[slice(0, 1)])
-        vr.seek(0)
-    else:
-        from ._pyav_video_reader import VideoHandler
-
-        as_numpy = lambda frame: frame
-        vr = VideoHandler(path)
-
-    dtype = np.dtype(dtype)
-    shm = SharedMemory(name=shm_name)
-    buf = np.ndarray(frame_shape, dtype=dtype, buffer=shm.buf)
+    buffer = create_buffers(
+        shared_mems,
+        colorspace=colorspace,
+        shape_frame=shape_frame,
+        shape_chroma=shape_chroma,
+        n_frames=1
+    )
 
     try:
         while not stop_event.is_set():
@@ -59,25 +49,33 @@ def _reader_process(
                 continue
 
             rid, index = request
-            frame = as_numpy(vr[index])
+            frame: av.VideoFrame = vr[index][0]
 
             if cancel_event.is_set():
                 cancel_event.clear()
                 continue
 
-            if frame.shape != buf.shape or frame.dtype != dtype:
-                shm.close()
-                shm = SharedMemory(create=True, size=frame.nbytes)
-                buf = np.ndarray(frame.shape, dtype=frame.dtype, buffer=shm.buf)
-                dtype = frame.dtype
+            # TODO: Deal with n_frames changing
+            # if frame.shape != buf.shape or frame.dtype != dtype:
+            #     shared_mems.close()
+            #     shared_mems = SharedMemory(create=True, size=frame.nbytes)
+            #     buf = np.ndarray(frame.shape, dtype=frame.dtype, buffer=shared_mems.buf)
+            #     dtype = frame.dtype
 
             if cancel_event.is_set():
                 cancel_event.clear()
                 continue
 
             with buffer_lock:
-                np.copyto(buf, frame)
-                response_queue.put((rid, frame.shape, str(frame.dtype), shm.name))
+                if frame.format.name == Colorspace.rgb24:
+                    np.copyto(buffer, pyav_trim_plane(frame.planes[0]), casting="no")
+
+                elif frame.format.name == Colorspace.yuv420p:
+                    np.copyto(buffer[0], pyav_trim_plane(frame.planes[0]), casting="no")
+                    np.copyto(buffer[1], pyav_trim_plane(frame.planes[1]), casting="no")
+                    np.copyto(buffer[2], pyav_trim_plane(frame.planes[2]), casting="no")
+
+                response_queue.put(rid)
     finally:
         try:
             if hasattr(vr, "close"):
@@ -85,6 +83,6 @@ def _reader_process(
         except Exception as e:
             print(f"[_reader_process] Failed to close video reader: {e}")
         try:
-            shm.close()
+            shared_mems.close()
         except Exception:
             pass

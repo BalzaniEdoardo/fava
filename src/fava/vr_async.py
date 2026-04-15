@@ -1,14 +1,8 @@
 from __future__ import annotations
 
-import os
-
-# decord uses up all the RAM otherwise
-os.environ["DECORD_EOF_RETRY_MAX"] = "128"
-
 from concurrent.futures import Future
 import multiprocessing
-from multiprocessing import Process, Queue
-from multiprocessing.shared_memory import SharedMemory
+from multiprocessing import Queue
 from pathlib import Path
 import threading
 
@@ -16,14 +10,9 @@ import sys
 
 import numpy as np
 
-try:
-    from decord import VideoReader
-except ImportError:
-    VideoReader = None
-
 from ._pyav_video_reader import VideoHandler
-from .config import config
 from ._vr_process import _reader_process
+from .utils import Colorspace, FutureArray, SharedMemRGB, SharedMemYUV, create_shared_memory, create_buffers
 
 # fork clones the parent process directly — no re-import of the main script,
 # so AsyncVideoReader can be instantiated at module level (e.g. in scripts or
@@ -38,25 +27,42 @@ class AsyncVideoReader:
     def __array__(self) -> AsyncVideoReader:
         return self
 
-    def __init__(self, path: str | Path, **kwargs):
+    def __init__(
+            self,
+            path: str | Path,
+            **kwargs,
+    ):
         self._path = Path(path)
         self._kwargs = kwargs
 
-        if config.backend == "decord":
-            vr = VideoReader(str(self._path), num_threads=1)
-            frame0 = vr[10].asnumpy()
-            vr.seek(0)
-        else:
-            vr = VideoHandler(self._path, pixel_format="rgb24")
-            frame0 = vr[0]
+        vr = VideoHandler(self._path, pixel_format=None)
+        frame0 = vr[(slice(0, 1),)][0]
 
-        self._shape = (len(vr), *frame0.shape)
-        self._dtype = np.dtype(frame0.dtype)
-        if hasattr(vr, "close"):
-            vr.close()
+        # width, height to rows, cols
+        self._shape_frame = vr.shape[2], vr.shape[1]
+        n_frames = vr.shape[0]
+
+        colorspace = Colorspace(frame0.format.name)
+
+        self._colorspace = colorspace
+        frame0_numpy = frame0.to_ndarray()
+        self._dtype = frame0_numpy.dtype
+
+        if self.colorspace == Colorspace.rgb24:
+            self._shape = (n_frames, *self._shape_frame, 3)
+            self._shape_chroma = None
+
+        elif self.colorspace == Colorspace.yuv420p:
+            self._shape = (n_frames, *self._shape_frame)
+            self._shape_chroma = frame0.format.chroma_height(), frame0.format.chroma_width()
+
+        n_frames = 1
+
+        self._shared_mems = create_shared_memory(frame0, n_frames=n_frames)
+        shared_mem_names = tuple(b.name for b in self.shared_mems)
+
+        vr.close()
         del vr
-
-        self._shm = SharedMemory(create=True, size=frame0.nbytes)
 
         self._request_queue: Queue = mp_ctx.Queue()
         self._response_queue: Queue = mp_ctx.Queue()
@@ -66,19 +72,25 @@ class AsyncVideoReader:
         self._buffer_lock = mp_ctx.Lock()
 
         self._pending_rid: int = 0
-        self._pending_future: Future | None = None
-        self._lock = threading.Lock()
+        self._pending_future: FutureArray | None = None
+        self._listener_lock = threading.Lock()
 
-        self._result = np.ndarray((1, *frame0.shape), dtype=self.dtype, buffer=self._shm.buf)
+        self._buffer = create_buffers(
+            self._shared_mems,
+            colorspace=colorspace,
+            shape_frame=self._shape_frame,
+            shape_chroma=self._shape_chroma,
+            n_frames=1,
+        )
 
         self._worker = mp_ctx.Process(
             target=_reader_process,
             kwargs=dict(
                 path=self._path,
-                kwargs=self._kwargs,
-                shm_name=self._shm.name,
-                frame_shape=(1, *frame0.shape),
-                dtype=str(self._dtype),
+                shared_mem_names=shared_mem_names,
+                colorspace=self.colorspace,
+                shape_frame=self._shape_frame,
+                shape_chroma=self._shape_chroma,
                 request_queue=self._request_queue,
                 response_queue=self._response_queue,
                 stop_event=self._stop_event,
@@ -92,41 +104,69 @@ class AsyncVideoReader:
         self._listener = threading.Thread(target=self._listen, daemon=True)
         self._listener.start()
 
+    @property
+    def shared_mems(self) -> SharedMemRGB | SharedMemYUV:
+        return self._shared_mems
+
+    @property
+    def colorspace(self) -> Colorspace:
+        return self._colorspace
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self._shape
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self._dtype
+
+    @property
+    def ndim(self) -> int:
+        return len(self._shape)
+
     def _listen(self):
         while True:
-            msg = self._response_queue.get()
-            if msg is None:
+            rid = self._response_queue.get()
+            if rid is None:
                 break
 
-            rid, frame_shape, dtype, shm_name = msg
-
-            with self._lock:
+            with self._listener_lock:
                 if rid != self._pending_rid:
                     continue
 
-                if shm_name != self._shm.name:
-                    self._shm.unlink()
-                    self._shm.close()
-                    self._shm = SharedMemory(name=shm_name)
-                    self._result = np.ndarray(frame_shape, dtype=np.dtype(dtype), buffer=self._shm.buf)
+                # TODO: if shared mem changes due to different number of frames
+                # if shm_name != self._shared_mems.name:
+                #     self._shared_mems.unlink()
+                #     self._shared_mems.close()
+                #     self._shared_mems = SharedMemory(name=shm_name)
+                #
+                #     self._result = np.ndarray(
+                #         frame_shape, dtype=np.dtype(dtype), buffer=self._shared_mems.buf
+                #     )
 
                 future = self._pending_future
 
             with self._buffer_lock:
-                frame_copy = self._result.copy()
+                if self.colorspace == Colorspace.rgb24:
+                    future.set_result(self._buffer.copy())
 
-            future.set_result(frame_copy)
+                elif self.colorspace == Colorspace.yuv420p:
+                    future.set_result(
+                        (
+                            self._buffer[0].copy(),
+                            self._buffer[1].copy(),
+                            self._buffer[2].copy(),
+                        )
+                    )
 
-    def __getitem__(self, index) -> Future:
-        with self._lock:
+    def __getitem__(self, index) -> FutureArray:
+        with self._listener_lock:
             if self._pending_future is not None and not self._pending_future.done():
                 self._pending_future.cancel()
                 print("cancelled")
                 self._cancel_event.set()
 
             self._pending_rid += 1
-            # a trick to get the resultant shape of the sliced array with a zero-memory dummy array
-            final_shape = np.empty(shape=self.shape, dtype="V0")[index[0]].shape
             future = Future()
             self._pending_future = future
 
@@ -140,17 +180,5 @@ class AsyncVideoReader:
             self._worker.join()
             self._response_queue.put(None)
             self._listener.join()
-        self._shm.unlink()
-        self._shm.close()
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        return self._shape
-
-    @property
-    def dtype(self) -> np.dtype:
-        return self._dtype
-
-    @property
-    def ndim(self) -> int:
-        return len(self._shape)
+        self._shared_mems.unlink()
+        self._shared_mems.close()

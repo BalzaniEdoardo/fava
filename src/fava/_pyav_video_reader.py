@@ -346,8 +346,10 @@ class VideoHandler(BaseAudioVideo):
             with av.open(self.file_path) as container:
                 stream = container.streams.video[self.stream_index]
                 n_frames = stream.frames
-                has_b_frames = bool(stream.codec_context.has_b_frames)
-                max_b_frames = stream.codec_context.max_b_frames
+                ctx = stream.codec_context
+                has_b_frames = bool(ctx.has_b_frames)
+                # guard against max_b_frames set to None for non-b-frame codecs
+                max_b_frames = max(getattr(ctx, "max_b_frames", 1) or 1, 1)
                 process = sorted if has_b_frames else lambda x: x
                 temp = []
                 # setup config for fixed-size and variable size index.
@@ -393,51 +395,6 @@ class VideoHandler(BaseAudioVideo):
             print("Index thread error:", e)
         finally:
             self._index_ready.set()
-
-    # def _build_index(self):
-    #     try:
-    #         with av.open(self.file_path) as container:
-    #             stream = container.streams.video[self.stream_index]
-    #             has_b_frames = bool(stream.codec_context.has_b_frames)
-    #             process = sorted if has_b_frames else lambda x: x
-    #             pts_list = []
-    #             temp = []
-    #
-    #             for packet in container.demux(stream):
-    #                 if not self._running:
-    #                     return
-    #                 if packet.pts is None or packet.pts < 0:
-    #                     continue
-    #                 if has_b_frames:
-    #                     if packet.is_keyframe and temp:
-    #                         chunk = process(temp)
-    #                         with self._lock:
-    #                             pts_list.extend(chunk)
-    #                             self._i = len(pts_list)
-    #                         temp.clear()
-    #                     temp.append(packet.pts)
-    #                 else:
-    #                     temp.append(packet.pts)
-    #                     if len(temp) >= _INDEX_FLUSH_EVERY:
-    #                         chunk = process(temp)
-    #                         with self._lock:
-    #                             pts_list.extend(chunk)
-    #                             self._i = len(pts_list)
-    #                         temp.clear()
-    #
-    #             if temp:
-    #                 chunk = process(temp)
-    #                 with self._lock:
-    #                     pts_list.extend(chunk)
-    #                     self._i = len(pts_list)
-    #
-    #             with self._lock:
-    #                 self.all_pts = np.array(pts_list, dtype=np.int64)
-    #
-    #     except Exception as e:
-    #         print("Index thread error:", e)
-    #     finally:
-    #         self._index_ready.set()
 
     def _get_frame_idx(self, pts: int) -> int:
         """

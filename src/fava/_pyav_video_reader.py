@@ -905,21 +905,24 @@ class VideoHandler(BaseAudioVideo):
         time_is_int = isinstance(idx, int)
 
         if isinstance(idx, slice):
+            # Resolve frame count once — fast path if already known, otherwise waits.
+            n_frames = self._n_frames if self._n_frames is not None else self.shape[0]
+
             # Fill in missing slice components
             start = idx.start or 0
-            if start >= self.shape[0]:
+            if start >= n_frames:
                 if self.pixel_format is not None:
                     return np.empty((0, *self._frame_shape), dtype=np.uint8)
                 else:
                     return []
-            stop = idx.stop if idx.stop is not None else self.shape[0]
+            stop = idx.stop if idx.stop is not None else n_frames
             step = idx.step if idx.step is not None else 1
 
             # convert negative vals
-            start = start if start >= 0 else start + self.shape[0]
-            start = max(0, min(start, self.shape[0]))
-            stop = stop + self.shape[0] if stop < 0 else stop
-            stop = max(0, min(stop, self.shape[0]))
+            start = start if start >= 0 else start + n_frames
+            start = max(0, min(start, n_frames))
+            stop = stop + n_frames if stop < 0 else stop
+            stop = max(0, min(stop, n_frames))
 
             # revert slice if negative step
             revert = step < 0
@@ -952,7 +955,8 @@ class VideoHandler(BaseAudioVideo):
         with self._set_get_from_index(True):
             # TODO Check borders
             idx_start = idx if not hasattr(idx, "start") else idx.start
-            idx_start = idx_start if idx_start >= 0 else self.shape[0] + idx_start
+            n_frames = self._n_frames if self._n_frames is not None else self.shape[0]
+            idx_start = idx_start if idx_start >= 0 else n_frames + idx_start
             frame = self.get(idx_start)
             # handle slice requesting a single frame:
             # for arrays add 1 dimension (1, pixel, pixel)

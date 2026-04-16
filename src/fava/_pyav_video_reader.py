@@ -275,6 +275,9 @@ class VideoHandler(BaseAudioVideo):
         self.key_mask = None
 
         self._i = 0  # number of committed (valid) PTS entries
+        # None means the total frame count is not yet known (e.g. vp9/webm);
+        # set to the final count by _build_index before signalling _index_ready.
+        self._n_frames: int | None = self.stream.frames if self.stream.frames > 0 else None
         self._index_thread = threading.Thread(target=self._build_index, daemon=True)
 
         self._index_ready = threading.Event()
@@ -447,6 +450,20 @@ class VideoHandler(BaseAudioVideo):
         except Exception as e:
             print("Index thread error:", e)
         finally:
+            self._n_frames = self._i
+            # check if time and frames matches otherwise "correct"
+            if self._time_provided and len(self.time) != self._i:
+                warnings.warn(
+                    f"The provided time array has length {len(self.time)}, but the video has {self._i} frames. "
+                    "Overriding time with `np.linspace(time[0], time[-1], n_frames)`.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                self.time = np.linspace(self.time[0], self.time[-1], self._i)
+            elif not self._time_provided and len(self.time) != self._i:
+                frame_duration = 1 / float(self.stream.average_rate)
+                self.time = np.linspace(0, frame_duration * self._i - frame_duration, self._i)
+
             self._index_ready.set()
 
     def _get_frame_idx(self, pts: int) -> Tuple[int, bool]:
@@ -691,25 +708,9 @@ class VideoHandler(BaseAudioVideo):
           may grow while the background indexer discovers frames. A warning is
           emitted until indexing is complete.
         """
-        if (
-            self._time_provided
-        ):  # TODO maybe check what is the actual number of frames decoded and throw a warning
-            return len(self.time), self.stream.width, self.stream.height
-        has_frames = hasattr(self.stream, "frames") and self.stream.frames > 0
-        is_done_unpacking = self._index_ready.is_set()
-        if not has_frames and not is_done_unpacking:
-            warnings.warn(
-                message="Video ``shape``, which corresponds to the number of frames, is being "
-                "calculated runtime and will be updated.",
-                stacklevel=2,
-            )
-        with self._lock:
-            current_len = self._i
-        return (
-            (len(self.time), self.stream.width, self.stream.height)
-            if has_frames
-            else (current_len, self.stream.width, self.stream.height)
-        )
+        if self._n_frames is None:
+            self._wait_for_all_pts()
+        return self._n_frames, self.stream.width, self.stream.height
 
     @property
     def _frame_shape(self) -> Tuple[int, ...]:
@@ -755,14 +756,18 @@ class VideoHandler(BaseAudioVideo):
         """
         return self.time
 
-    def _wait_for_index(self, timeout=2.0):
-        """Wait up to timeout.
-
-        For debugging purposes, or testing, make sure that the
-        threads are completed.
-        """
+    def _wait_for_all_pts(self, timeout=None):
+        """Wait until the PTS index thread has finished."""
         self._index_ready.wait(timeout)
+
+    def _wait_for_key_pts(self, timeout=None):
+        """Wait until the keyframe PTS thread has finished."""
         self._pts_keyframe_ready.wait(timeout)
+
+    def _wait_for_index(self, timeout=None):
+        """Wait until both the PTS index and keyframe threads have finished."""
+        self._wait_for_all_pts(timeout)
+        self._wait_for_key_pts(timeout)
 
     def get_slice(self, start: float, end: float = None):
         # TODO check start and end are sorted

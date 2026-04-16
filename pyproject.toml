@@ -24,6 +24,7 @@ dev = [
     "pytest",
     "nox",
     "ruff",
+    "matplotlib",
 ]
 
 [tool.setuptools.packages.find]

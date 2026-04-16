@@ -28,10 +28,6 @@ dev = [
     "matplotlib",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "--cov=fava"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["fava"]

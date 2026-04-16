@@ -50,23 +50,11 @@ def tests(session):
         )
 
     session.log("Run Tests...")
+    cov_args = list(session.posargs) if session.posargs else []
     session.run(
         "pytest",
+        *cov_args,
         env={
             "WGPU_FORCE_OFFSCREEN": "1",
         }
     )
-
-    if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
-        # CI environment - use xvfb
-        session.run(
-            "pytest",  # Start pytest directly, no "run" or "-m"
-            "--cov=src/fava",
-            "--cov-report=xml",
-            "--cov-report=term",
-            "-v",
-            "tests/",
-            external=True,
-        )
-    else:
-        session.run("pytest -v tests/")

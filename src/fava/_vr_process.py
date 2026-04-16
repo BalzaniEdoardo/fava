@@ -16,6 +16,7 @@ def _reader_process(
         colorspace: Colorspace,
         shape_frame: tuple[int, int],
         shape_chroma: tuple[int, int] | None,
+        yuv_packed: bool,
         request_queue: Queue,
         response_queue: Queue,
         stop_event: Event,
@@ -31,7 +32,8 @@ def _reader_process(
         colorspace=colorspace,
         shape_frame=shape_frame,
         shape_chroma=shape_chroma,
-        n_frames=1
+        n_frames=1,
+        yuv_packed=yuv_packed,
     )
 
     try:
@@ -71,9 +73,12 @@ def _reader_process(
                     np.copyto(buffer, pyav_trim_plane(frame.planes[0]), casting="no")
 
                 elif frame.format.name == Colorspace.yuv420p:
-                    np.copyto(buffer[0], pyav_trim_plane(frame.planes[0]), casting="no")
-                    np.copyto(buffer[1], pyav_trim_plane(frame.planes[1]), casting="no")
-                    np.copyto(buffer[2], pyav_trim_plane(frame.planes[2]), casting="no")
+                    if yuv_packed:
+                        np.copyto(buffer, frame.to_ndarray(), casting="no")
+                    else:
+                        np.copyto(buffer[0], pyav_trim_plane(frame.planes[0]), casting="no")
+                        np.copyto(buffer[1], pyav_trim_plane(frame.planes[1]), casting="no")
+                        np.copyto(buffer[2], pyav_trim_plane(frame.planes[2]), casting="no")
 
                 response_queue.put(rid)
     finally:

@@ -30,6 +30,7 @@ class AsyncVideoReader:
     def __init__(
             self,
             path: str | Path,
+            yuv_packed: bool = False,
             **kwargs,
     ):
         self._path = Path(path)
@@ -58,7 +59,9 @@ class AsyncVideoReader:
 
         n_frames = 1
 
-        self._shared_mems = create_shared_memory(frame0, n_frames=n_frames)
+        self._yuv_packed = yuv_packed
+
+        self._shared_mems = create_shared_memory(frame0, n_frames=n_frames, yuv_packed=self._yuv_packed)
         shared_mem_names = tuple(b.name for b in self.shared_mems)
 
         vr.close()
@@ -77,10 +80,11 @@ class AsyncVideoReader:
 
         self._buffer = create_buffers(
             self._shared_mems,
-            colorspace=colorspace,
+            colorspace=self.colorspace,
             shape_frame=self._shape_frame,
             shape_chroma=self._shape_chroma,
             n_frames=1,
+            yuv_packed=self._yuv_packed,
         )
 
         self._worker = mp_ctx.Process(
@@ -91,6 +95,7 @@ class AsyncVideoReader:
                 colorspace=self.colorspace,
                 shape_frame=self._shape_frame,
                 shape_chroma=self._shape_chroma,
+                yuv_packed=yuv_packed,
                 request_queue=self._request_queue,
                 response_queue=self._response_queue,
                 stop_event=self._stop_event,
@@ -147,7 +152,7 @@ class AsyncVideoReader:
                 future = self._pending_future
 
             with self._buffer_lock:
-                if self.colorspace == Colorspace.rgb24:
+                if self.colorspace == Colorspace.rgb24 or self._yuv_packed:
                     future.set_result(self._buffer.copy())
 
                 elif self.colorspace == Colorspace.yuv420p:

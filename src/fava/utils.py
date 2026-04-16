@@ -22,7 +22,7 @@ class Colorspace(StrEnum):
 
 
 def create_shared_memory(
-    frame: av.VideoFrame, n_frames: int = 1
+    frame: av.VideoFrame, n_frames: int = 1, yuv_packed: bool = False
 ) -> SharedMemYUV | SharedMemRGB:
     colorspace = frame.format.name
 
@@ -32,6 +32,11 @@ def create_shared_memory(
         return (SharedMemory(create=True, size=rows * cols * 3 * n_frames),)
 
     elif colorspace == Colorspace.yuv420p:
+        if yuv_packed:
+            # packed shape
+            rows = rows * 3 // 2
+            return (SharedMemory(create=True, size=rows * cols * 3 * n_frames),)
+
         y = SharedMemory(create=True, size=rows * cols * n_frames)
 
         rows_chroma, cols_chroma = (
@@ -56,8 +61,17 @@ def create_buffers(
     shape_frame: tuple[int, int],
     shape_chroma: tuple[int, int] | None,
     n_frames: int = 1,
+    yuv_packed: bool = False
 ) -> UInt8Array | TupleYUV:
     if colorspace == Colorspace.yuv420p:
+        if yuv_packed:
+            buffer = np.ndarray(
+                shape=(n_frames, shape_frame[0] * 3 // 2, shape_frame[1]),
+                dtype=np.uint8,
+                buffer=shared_mems[0].buf,
+            )
+            return buffer
+
         buffer_y = np.ndarray(
             shape=(n_frames, *shape_frame), dtype=np.uint8, buffer=shared_mems[0].buf
         )

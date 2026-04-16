@@ -13,10 +13,17 @@ fpl.select_adapter(adapter)
 
 paths = sorted(Path("/home/kushal/data/gerbils/").glob("*.mp4"))
 # paths = sorted(Path("/home/kushal/data/alyx/cortexlab/Subjects/SP058/2024-07-18/raw_video_data/").glob("*.mp4"))
+paths.extend(
+    sorted(
+        Path(
+            "/home/kushal/data/alyx/cortexlab/Subjects/SP058/2024-07-18/raw_video_data/"
+        ).glob("*.mp4")
+    )
+)
 
 vrs = list()
 for p in paths:
-    vrs.append(AsyncVideoReader(p))
+    vrs.append(AsyncVideoReader(p, yuv_packed=False))
 
 ref_ranges = {"t": (0, vrs[0].shape[0], 1)}
 ndw = fpl.NDWidget(
@@ -49,7 +56,7 @@ for i, vr in enumerate(vrs):
     )
 
 ndw.show()
-ndw.indices["t"] = 6000
+# ndw.indices["t"] = 6000
 ndw._sliders_ui._playing["t"] = True
 ndw.figure.imgui_show_fps = True
 run_profile = False

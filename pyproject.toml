@@ -22,10 +22,15 @@ dependencies = [
 decord = ["decord2"]  # you wish it was that easy!
 dev = [
     "pytest",
+    "pytest-cov",
     "nox",
     "ruff",
     "matplotlib",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=fava"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -31,13 +31,14 @@ def _reader_process(
 
         os.environ["DECORD_EOF_RETRY_MAX"] = "128"
         vr = VideoReader(str(path), ctx=gpu(0))
-        as_numpy = lambda frame: frame.asnumpy()
+        def as_numpy(frame):
+            return frame.asnumpy()
         as_numpy(vr[slice(0, 1)])
         vr.seek(0)
     else:
         from ._pyav_video_reader import VideoHandler
-
-        as_numpy = lambda frame: frame
+        def as_numpy(frame):
+            return frame
         vr = VideoHandler(path)
 
     dtype = np.dtype(dtype)

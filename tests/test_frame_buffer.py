@@ -1,5 +1,4 @@
 """Unit tests for FrameBuffer."""
-import pytest
 
 from fava._pyav_video_reader import FrameBuffer
 

@@ -126,7 +126,6 @@ class AsyncVideoReader:
 
             self._pending_rid += 1
             # a trick to get the resultant shape of the sliced array with a zero-memory dummy array
-            final_shape = np.empty(shape=self.shape, dtype="V0")[index[0]].shape
             future = Future()
             self._pending_future = future
 

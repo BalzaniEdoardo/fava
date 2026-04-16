@@ -863,7 +863,7 @@ class VideoHandler(BaseAudioVideo):
 
     def __getitem__(
         self,
-        idx: int | slice | Tuple[int | slice, *Tuple[slice, ...]],
+        idx: int | slice | Tuple[int | slice, Tuple[slice, ...]],
     ) -> NDArray | av.VideoFrame | List[av.VideoFrame]:
         """
         Get item for video frame.

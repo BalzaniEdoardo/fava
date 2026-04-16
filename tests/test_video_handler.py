@@ -204,9 +204,16 @@ def test_getitem_slice_matches_expected(video_info, start, stop, step):
     frame_array, _, _, video = video_info
     video = pathlib.Path(video)
     with VideoHandler(video) as video_obj:
-        frames = np.stack([f.to_ndarray() for f in video_obj[start:stop:step]])
-        # make sure the video meta-info about time are fully computed
-        video_obj._wait_for_index(timeout=15)
+        # captured immediately after __init__ to see thread state before any slice call
+        print(f"\n[diag] {video.name}  [{start}:{stop}:{step}]"
+              f"  _n_frames={video_obj._n_frames}  _i={video_obj._i}"
+              f"  len(time)={len(video_obj.time)}  index_ready={video_obj._index_ready.is_set()}")
+        raw_frames = list(video_obj[start:stop:step])
+        print(f"[diag] post-slice: n_collected={len(raw_frames)}"
+              f"  _n_frames={video_obj._n_frames}  _i={video_obj._i}"
+              f"  index_ready={video_obj._index_ready.is_set()}")
+        frames = np.stack([f.to_ndarray() for f in raw_frames])
+        video_obj._wait_for_index()
         np.testing.assert_array_equal(
             frame_array[start:stop:step], frames
         )

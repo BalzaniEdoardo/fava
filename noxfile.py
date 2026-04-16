@@ -18,15 +18,11 @@ def linters_fix(session):
     session.run("ruff", "check", "src", "--ignore", "D", "--fix")
     session.run("ruff", "check", "tests", "--ignore", "D", "--fix")
 
-@nox.session(name="tests", reuse_venv=True)
-def tests(session):
-    """Run the test suite."""
-    # session.log("install")
+@nox.session(name="video_gen", reuse_venv=True)
+def video_gen(session):
+    """Generate test videos."""
     session.install("-e", ".[dev]", external=True)
-    # session.run("pip", "list")
     tests_path = pathlib.Path(__file__).parent.resolve() / "tests"
-
-    # generate sample videos
     video_dir = tests_path / "test_video"
     video_dir.mkdir(exist_ok=True)
     generated_video = [
@@ -41,32 +37,22 @@ def tests(session):
         ]
     ]
     is_in_dir = all((video_dir / name).exists() for name in generated_video)
-    session.log(f"video found {is_in_dir}")
+    session.log(f"videos found: {is_in_dir}")
     if not is_in_dir:
         session.log("Generating numbered videos...")
-        session.run(
-            "python",
-            f"{video_dir.parent / 'generate_numbered_video.py'}"
-        )
+        session.run("python", str(tests_path / "generate_numbered_video.py"))
 
+
+@nox.session(name="tests", reuse_venv=True)
+def tests(session):
+    """Run the test suite."""
+    session.install("-e", ".[dev]", external=True)
     session.log("Run Tests...")
+    cov_args = list(session.posargs) if session.posargs else []
     session.run(
         "pytest",
+        *cov_args,
         env={
             "WGPU_FORCE_OFFSCREEN": "1",
         }
     )
-
-    if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
-        # CI environment - use xvfb
-        session.run(
-            "pytest",  # Start pytest directly, no "run" or "-m"
-            "--cov=src/fava",
-            "--cov-report=xml",
-            "--cov-report=term",
-            "-v",
-            "tests/",
-            external=True,
-        )
-    else:
-        session.run("pytest -v tests/")

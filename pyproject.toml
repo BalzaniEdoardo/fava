@@ -22,8 +22,10 @@ dependencies = [
 decord = ["decord2"]  # you wish it was that easy!
 dev = [
     "pytest",
+    "pytest-cov",
     "nox",
     "ruff",
+    "matplotlib",
 ]
 
 [tool.setuptools.packages.find]

@@ -1,6 +1,7 @@
 import numpy as np
 from pathlib import Path
 
+import glfw
 import fastplotlib as fpl
 from fastplotlib.widgets.nd_widget import VideoProcessor
 import pyinstrument
@@ -13,13 +14,13 @@ fpl.select_adapter(adapter)
 
 paths = sorted(Path("/home/kushal/data/gerbils/").glob("*.mp4"))
 # paths = sorted(Path("/home/kushal/data/alyx/cortexlab/Subjects/SP058/2024-07-18/raw_video_data/").glob("*.mp4"))
-paths.extend(
-    sorted(
-        Path(
-            "/home/kushal/data/alyx/cortexlab/Subjects/SP058/2024-07-18/raw_video_data/"
-        ).glob("*.mp4")
-    )
-)
+# paths.extend(
+#     sorted(
+#         Path(
+#             "/home/kushal/data/alyx/cortexlab/Subjects/SP058/2024-07-18/raw_video_data/"
+#         ).glob("*.mp4")
+#     )
+# )
 
 vrs = list()
 for p in paths:
@@ -30,7 +31,7 @@ ndw = fpl.NDWidget(
     ref_ranges=ref_ranges,
     shape=(1, len(vrs)),
     size=(1800, 500),
-    canvas_kwargs={"max_fps": 999},
+    canvas_kwargs={"max_fps": 999, "vsync": False},
 )
 
 
@@ -55,8 +56,15 @@ for i, vr in enumerate(vrs):
         processor_type=VideoProcessor,
     )
 
+# use to verify all NDGraphics are in sync
+def update_title():
+    for ndg, subplot in zip(ndw.ndgraphics, ndw.figure):
+        subplot.title.text = str(ndg.indices_displayed)
+
+ndw.figure.add_animations(update_title)
+
 ndw.show()
-# ndw.indices["t"] = 6000
+# ndw.indices["t"] =  6000
 ndw._sliders_ui._playing["t"] = True
 ndw.figure.imgui_show_fps = True
 run_profile = False

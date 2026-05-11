@@ -4,6 +4,7 @@ from concurrent.futures import Future
 import multiprocessing
 from multiprocessing import Queue
 from pathlib import Path
+import queue as _stdlib_queue
 import threading
 
 import sys
@@ -71,10 +72,14 @@ class AsyncVideoReader:
         self._response_queue: Queue = mp_ctx.Queue()
 
         self._stop_event = mp_ctx.Event()
-        self._cancel_event = mp_ctx.Event()
         self._buffer_lock = mp_ctx.Lock()
 
         self._pending_rid: int = 0
+        # shared with the worker process. The worker uses this to skip any
+        # request whose rid has already been superseded by a newer one,
+        # without false-dropping the current request (a single ``cancel_event``
+        # bit can't distinguish *which* request was cancelled).
+        self._latest_rid = mp_ctx.Value("q", 0)
         self._pending_future: FutureArray | None = None
         self._listener_lock = threading.Lock()
 
@@ -99,7 +104,7 @@ class AsyncVideoReader:
                 request_queue=self._request_queue,
                 response_queue=self._response_queue,
                 stop_event=self._stop_event,
-                cancel_event=self._cancel_event,
+                latest_rid=self._latest_rid,
                 buffer_lock=self._buffer_lock,
             ),
             daemon=True,
@@ -151,29 +156,44 @@ class AsyncVideoReader:
 
                 future = self._pending_future
 
-            with self._buffer_lock:
-                if self.colorspace == Colorspace.rgb24 or self._yuv_packed:
-                    future.set_result(self._buffer.copy())
+                # set_result must happen while holding _listener_lock, otherwise
+                # __getitem__ can cancel ``future`` between this point and the
+                # set_result call below, raising InvalidStateError and killing
+                # the listener thread (the reader then permanently hangs).
+                with self._buffer_lock:
+                    if self.colorspace == Colorspace.rgb24 or self._yuv_packed:
+                        future.set_result(self._buffer.copy())
 
-                elif self.colorspace == Colorspace.yuv420p:
-                    future.set_result(
-                        (
-                            self._buffer[0].copy(),
-                            self._buffer[1].copy(),
-                            self._buffer[2].copy(),
+                    elif self.colorspace == Colorspace.yuv420p:
+                        future.set_result(
+                            (
+                                self._buffer[0].copy(),
+                                self._buffer[1].copy(),
+                                self._buffer[2].copy(),
+                            )
                         )
-                    )
 
     def __getitem__(self, index) -> FutureArray:
         with self._listener_lock:
             if self._pending_future is not None and not self._pending_future.done():
                 self._pending_future.cancel()
-                print("cancelled")
-                self._cancel_event.set()
 
             self._pending_rid += 1
+            # publish to the worker so it knows the newest rid in flight
+            self._latest_rid.value = self._pending_rid
             future = Future()
             self._pending_future = future
+
+        # drain stale entries before enqueuing the new one. The worker will
+        # skip them via the rid check anyway, but each multiprocessing.Queue
+        # ``get`` is several ms of cross-process IPC - hundreds of stale
+        # entries (from rapid slider dragging) turn into multi-second delays
+        # before the worker reaches the latest request.
+        while True:
+            try:
+                self._request_queue.get_nowait()
+            except _stdlib_queue.Empty:
+                break
 
         self._request_queue.put((self._pending_rid, index[0]))
         return future

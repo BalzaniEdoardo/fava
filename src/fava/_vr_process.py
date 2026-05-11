@@ -1,6 +1,7 @@
 import queue
 from multiprocessing import Queue, Event, Lock
 from multiprocessing.shared_memory import SharedMemory
+from multiprocessing.sharedctypes import Synchronized
 from pathlib import Path
 
 import av
@@ -20,7 +21,7 @@ def _reader_process(
         request_queue: Queue,
         response_queue: Queue,
         stop_event: Event,
-        cancel_event: Event,
+        latest_rid: Synchronized,
         buffer_lock: Lock,
 ):
     vr = VideoHandler(path, pixel_format=None)
@@ -46,15 +47,19 @@ def _reader_process(
             if request is None:
                 break
 
-            if cancel_event.is_set():
-                cancel_event.clear()
+            rid, index = request
+
+            # skip if a newer request has already been submitted - precise
+            # per-rid check, unlike a single shared cancel bit which can't
+            # distinguish which request was cancelled
+            if rid < latest_rid.value:
                 continue
 
-            rid, index = request
             frame: av.VideoFrame = vr[index][0]
 
-            if cancel_event.is_set():
-                cancel_event.clear()
+            # re-check after decode (decode can be slow; a newer request may
+            # have arrived in the meantime)
+            if rid < latest_rid.value:
                 continue
 
             # TODO: Deal with n_frames changing
@@ -64,11 +69,13 @@ def _reader_process(
             #     buf = np.ndarray(frame.shape, dtype=frame.dtype, buffer=shared_mems.buf)
             #     dtype = frame.dtype
 
-            if cancel_event.is_set():
-                cancel_event.clear()
-                continue
-
             with buffer_lock:
+                # final check before writing; if we've been superseded, don't
+                # clobber the buffer for whatever rid the listener may still be
+                # mid-read on
+                if rid < latest_rid.value:
+                    continue
+
                 if frame.format.name == Colorspace.rgb24:
                     np.copyto(buffer, pyav_trim_plane(frame.planes[0]), casting="no")
 

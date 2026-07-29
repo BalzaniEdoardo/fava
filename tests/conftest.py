@@ -1,4 +1,4 @@
-"""Shared fixtures for the fava test suite."""
+"""Shared fixtures for the asyncvideo test suite."""
 
 import pathlib
 
@@ -23,7 +23,7 @@ def reference(video_path):
     """``(packed_frames, height)`` decoded straight from PyAV.
 
     This is the ground truth the async reader is compared against: decoding
-    here goes through PyAV directly, with none of fava's seeking, buffering or
+    here goes through PyAV directly, with none of asyncvideo's seeking, buffering or
     shared-memory machinery involved. Decoded once per session.
     """
     with av.open(str(video_path)) as container:

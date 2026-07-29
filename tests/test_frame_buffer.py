@@ -1,6 +1,6 @@
 """Unit tests for FrameBuffer."""
 
-from fava._pyav_video_reader import FrameBuffer
+from asyncvideo._pyav_video_reader import FrameBuffer
 
 # ---------------------------------------------------------------------------
 # Helpers

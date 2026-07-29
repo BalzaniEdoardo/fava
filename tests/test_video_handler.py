@@ -4,7 +4,7 @@ import av
 import numpy as np
 import pytest
 
-from fava import VideoHandler
+from asyncvideo import VideoHandler
 
 _SKIP_UNSORTED_PTS = pytest.mark.skip(reason="unsorted PTS / infinite-loop bug not fixed in this PR")
 

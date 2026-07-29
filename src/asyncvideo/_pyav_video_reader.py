@@ -231,7 +231,7 @@ class VideoHandler(BaseAudioVideo):
 
     Examples
     --------
-    >>> from fava import VideoHandler
+    >>> from asyncvideo import VideoHandler
     >>> vh = VideoHandler("example.mp4")  # doctest: +SKIP
     >>> # Get the frame at 1.5 seconds.
     >>> frame = vh.get(1.5)  # doctest: +SKIP

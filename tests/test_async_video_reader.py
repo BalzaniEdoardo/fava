@@ -14,8 +14,8 @@ from multiprocessing.shared_memory import SharedMemory
 import numpy as np
 import pytest
 
-from fava import AsyncVideoReader
-from fava.utils import ReaderError
+from asyncvideo import AsyncVideoReader
+from asyncvideo.utils import ReaderError
 
 # Long enough for a cold decode on a slow CI runner, short enough that a genuine
 # hang ends the run instead of hanging it.

@@ -3,9 +3,9 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fava"
+name = "asyncvideo"
 version = "0.1.0"
-description = "Fast Asyc Video Array: async video reader with fast random frame access."
+description = "Async video reader with fast random frame access."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
@@ -29,4 +29,4 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["fava"]
+include = ["asyncvideo"]

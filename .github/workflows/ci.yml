@@ -125,7 +125,7 @@ jobs:
 
       - name: Run tests (with coverage)
         if: runner.os == 'Linux'
-        run: nox -s tests -- --cov=src/fava --cov-report=xml --cov-report=term
+        run: nox -s tests -- --cov=src/asyncvideo --cov-report=xml --cov-report=term
 
       - name: Run tests
         if: runner.os != 'Linux'

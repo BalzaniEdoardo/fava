@@ -1,6 +1,4 @@
-from .config import config
+from ._pyav_video_reader import VideoHandler, pyav_trim_plane
 from .vr_async import AsyncVideoReader
-from ._pyav_video_reader import VideoHandler
 
-
-__all__ = ["config", "AsyncVideoReader", "VideoHandler"]
+__all__ = ["AsyncVideoReader", "VideoHandler", "pyav_trim_plane"]

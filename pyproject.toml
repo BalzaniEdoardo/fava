@@ -12,14 +12,13 @@ authors = [
     { name = "Kushal Kolar" },
     { name = "Edoardo Balzani" },
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "numpy",
     "av",
 ]
 
 [project.optional-dependencies]
-decord = ["decord2"]  # you wish it was that easy!
 dev = [
     "pytest",
     "pytest-cov",

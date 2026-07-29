@@ -16,6 +16,7 @@ import pytest
 
 from asyncvideo import AsyncVideoReader, VideoHandler
 from asyncvideo.utils import ReaderError
+from asyncvideo.vr_async import mp_ctx
 
 # Long enough for a cold decode on a slow CI runner, short enough that a genuine
 # hang ends the run instead of hanging it.
@@ -47,12 +48,30 @@ def _segment_names(reader) -> tuple[str, ...]:
 # the window in which superseding happens is never open and any assertion about
 # cancellation passes trivially.
 #
-# The worker is forked, so patching VideoHandler *before* the reader is
+# Where the worker is forked, patching VideoHandler *before* the reader is
 # constructed means the child inherits the slowed method. Nothing in ``src`` is
 # touched, and the parent is unaffected because only the worker decodes.
+#
+# This depends on fork copying the parent's memory. Under spawn (Windows) the
+# child re-imports the package, so the patch never reaches it and the worker runs
+# at full speed. These tests are skipped there rather than left to pass for the
+# wrong reason: the parent cancels a superseded future synchronously, so the
+# cancellation assertions would still hold with no lag at all, and whether the
+# first request was still in flight would come down to timing.
 # ---------------------------------------------------------------------------
 
 DECODE_LAG = 0.4
+
+# Deliberately the reader's own context, not multiprocessing's default: macOS
+# defaults to spawn while asyncvideo explicitly asks for a fork context, so
+# checking the default would skip these tests on a platform where they work.
+requires_fork = pytest.mark.skipif(
+    mp_ctx.get_start_method() != "fork",
+    reason=(
+        "lag injection patches the parent process and relies on fork to reach the "
+        "worker; under spawn the worker re-imports the module and never sees it"
+    ),
+)
 
 
 @pytest.fixture()
@@ -90,6 +109,7 @@ def slow_reader_factory(video_path, monkeypatch):
             r.shutdown()
 
 
+@requires_fork
 def test_lag_injection_actually_slows_the_worker(slow_reader_factory):
     """Guard the guard: if the patch stopped reaching the child, the tests below
     would silently go back to proving nothing."""
@@ -99,6 +119,7 @@ def test_lag_injection_actually_slows_the_worker(slow_reader_factory):
     assert time.monotonic() - started >= DECODE_LAG
 
 
+@requires_fork
 def test_get_supersedes_an_in_flight_index_request(slow_reader_factory, reference):
     """A time request must cancel an index request that is still decoding."""
     packed, height = reference
@@ -114,6 +135,7 @@ def test_get_supersedes_an_in_flight_index_request(slow_reader_factory, referenc
     assert stale.cancelled(), "the superseded request must be cancelled, not served"
 
 
+@requires_fork
 def test_index_supersedes_an_in_flight_get_request(slow_reader_factory, reference):
     """And the reverse: they share one submit path, so either can supersede."""
     packed, height = reference
@@ -129,6 +151,7 @@ def test_index_supersedes_an_in_flight_get_request(slow_reader_factory, referenc
     assert stale.cancelled()
 
 
+@requires_fork
 def test_only_the_newest_of_many_requests_is_served(slow_reader_factory, reference):
     """Rapid requests, as from dragging a slider: only the last one resolves.
 
@@ -154,6 +177,7 @@ def test_only_the_newest_of_many_requests_is_served(slow_reader_factory, referen
     )
 
 
+@requires_fork
 def test_superseded_request_does_not_corrupt_the_result(slow_reader_factory, reference):
     """The winning frame must be intact, not a mix of two decodes.
 

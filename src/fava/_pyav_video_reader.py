@@ -6,6 +6,7 @@ Handles opening/closing the stream, seeking, and keyframe extraction.
 from __future__ import annotations
 
 import abc
+import logging
 import pathlib
 import threading
 import time
@@ -17,6 +18,8 @@ from typing import Literal
 import av
 import numpy as np
 from numpy.typing import NDArray
+
+logger = logging.getLogger(__name__)
 
 # Number of packets to buffer before flushing to the index for codecs without
 # B-frames (where packet PTS are already in display order).
@@ -182,7 +185,7 @@ class BaseAudioVideo:
         try:
             self.container.close()
         except Exception:
-            print("AudioHandler failed to close the audiovideo stream.")
+            logger.exception("Failed to close the audiovideo stream.")
         finally:
             # dropping refs to fully close av.InputContainer
             self.container = None
@@ -409,9 +412,8 @@ class VideoHandler(BaseAudioVideo):
                     if packet.is_keyframe:
                         with self._lock:
                             self._keyframe_pts.append(packet.pts)
-        except Exception as e:
-            # do not block gui
-            print("Keyframe thread error:", e)
+        except Exception:
+            logger.exception("Keyframe thread error")
         finally:
             self._pts_keyframe_ready.set()
 
@@ -465,8 +467,8 @@ class VideoHandler(BaseAudioVideo):
                 with self._lock:
                     self.all_pts = np.asarray(self.all_pts[: self._i], dtype=np.int64)
 
-        except Exception as e:
-            print("Index thread error:", e)
+        except Exception:
+            logger.exception("Index thread error")
         finally:
             self._n_frames = self._i
             # check if time and frames matches otherwise "correct"

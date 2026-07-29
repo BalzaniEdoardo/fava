@@ -1,3 +1,4 @@
+import logging
 import queue
 from multiprocessing import Event, Lock, Queue
 from multiprocessing.shared_memory import SharedMemory
@@ -9,6 +10,8 @@ import numpy as np
 
 from ._pyav_video_reader import VideoHandler, pyav_trim_plane
 from .utils import Colorspace, SharedMemRGB, SharedMemYUV, create_buffers
+
+logger = logging.getLogger(__name__)
 
 
 def _reader_process(
@@ -92,13 +95,15 @@ def _reader_process(
         try:
             if hasattr(vr, "close"):
                 vr.close()
-        except Exception as e:
-            print(f"[_reader_process] Failed to close video reader: {e}")
+        except Exception:
+            logger.exception("[_reader_process] Failed to close video reader")
         # shared_mems is a tuple: 1 segment for rgb24/packed-yuv, 3 for planar
         # yuv. Only close() here — the parent created the segments and is the
         # one that unlink()s them, and unlink() must happen exactly once.
         for shm in shared_mems:
             try:
                 shm.close()
-            except Exception as e:
-                print(f"[_reader_process] Failed to close shared memory {shm.name}: {e}")
+            except Exception:
+                logger.exception(
+                    "[_reader_process] Failed to close shared memory %s", shm.name
+                )

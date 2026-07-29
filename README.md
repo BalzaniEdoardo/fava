@@ -164,7 +164,21 @@ The three cameras run at 60, 30 and 150 fps, so `t = 124.5 s` is frame **271**, 
 
 [`examples/ibl_multiview.py`](examples/ibl_multiview.py) is a runnable version of this against a public [International Brain Laboratory](https://www.internationalbrainlab.com) session that records three cameras at 60, 30 and 150 fps. It needs the docs extra (`pip install -e ".[docs]"`) and downloads a few megabytes of example clips on first run.
 
-The example data is derived from IBL public data, licensed [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) and modified — each clip is the opening seconds of a much longer recording. It is not covered by this package's MIT licence. If you use it, please cite [IBL et al. (2025)](https://www.nature.com/articles/s41586-025-09235-0) and the [technical paper](https://doi.org/10.6084/m9.figshare.21400815). `asyncvideo.fetch.DATA_ATTRIBUTION` carries the full notice.
+## Example data
+
+Every snippet above runs against short clips of a real recording, downloaded on first use by `asyncvideo.fetch` and cached locally. They are three cameras filming one mouse at 60, 30 and 150 fps, ten seconds each, about 10 MB in total. Reading your own videos needs none of this — `pooch` and `tqdm` come with the docs extra and are only used to fetch the examples.
+
+```python
+from asyncvideo.fetch import available_examples, fetch_times, fetch_video
+
+available_examples()          # ('left', 'body', 'right')
+fetch_video("left")           # path to the clip
+fetch_times("left")           # its per-frame timestamps, in seconds
+```
+
+Set `ASYNCVIDEO_DATA_DIR` to choose where they are cached.
+
+The data is derived from public data of the [International Brain Laboratory](https://www.internationalbrainlab.com), licensed [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) and **modified** — each clip is ten seconds taken from a recording several hours long, with its timestamps sliced to match. It is not covered by this package's MIT licence. If you use it, please cite [IBL et al. (2025)](https://www.nature.com/articles/s41586-025-09235-0) and the [technical paper](https://doi.org/10.6084/m9.figshare.21400815). `asyncvideo.fetch.DATA_ATTRIBUTION` carries the full notice.
 
 ![Frames read from a video by index and by timestamp](docs/images/random_access.png)
 

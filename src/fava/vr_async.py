@@ -15,6 +15,7 @@ from ._vr_process import _reader_process
 from .utils import (
     Colorspace,
     FutureArray,
+    ReaderError,
     SharedMemRGB,
     SharedMemYUV,
     create_buffers,
@@ -89,6 +90,11 @@ class AsyncVideoReader:
         self._pending_future: FutureArray | None = None
         self._listener_lock = threading.Lock()
 
+        # guards the shared-memory teardown so a second shutdown() cannot
+        # unlink segments that are already gone
+        self._release_lock = threading.Lock()
+        self._released = False
+
         self._buffer = create_buffers(
             self._shared_mems,
             colorspace=self.colorspace,
@@ -142,12 +148,26 @@ class AsyncVideoReader:
 
     def _listen(self):
         while True:
-            rid = self._response_queue.get()
-            if rid is None:
+            msg = self._response_queue.get()
+            if msg is None:
                 break
+
+            rid, status = msg
 
             with self._listener_lock:
                 if rid != self._pending_rid:
+                    continue
+
+                if status != ReaderError.ok:
+                    # Fail the future rather than leave the caller blocked: the
+                    # worker survives the error, so nothing else will ever
+                    # resolve this request. The traceback is in the worker log.
+                    self._pending_future.set_exception(
+                        RuntimeError(
+                            f"reader process failed to decode request {rid} "
+                            f"({ReaderError(status).name})"
+                        )
+                    )
                     continue
 
                 # TODO: if shared mem changes due to different number of frames
@@ -208,13 +228,41 @@ class AsyncVideoReader:
         self._stop_event.set()
         self._request_queue.put(None)  # wake up the worker if blocked on get()
         if wait:
-            self._worker.join()
-            self._response_queue.put(None)
-            self._listener.join()
-        # _shared_mems is a tuple: 1 segment for rgb24/packed-yuv, 3 for planar
-        # yuv. close() releases this process's mapping; unlink() destroys the
-        # segment and must happen exactly once, from the owner — this process
-        # created them, so it unlinks and the worker only closes.
-        for shm in self._shared_mems:
-            shm.close()
-            shm.unlink()
+            self._release()
+        else:
+            # The teardown cannot run inline here: ``_buffer`` is a numpy view
+            # onto the shared segments and ``_listen`` may still be copying out
+            # of it, so unmapping them while it runs is a use-after-free (a
+            # segfault, not an exception). Hand the join + teardown to a helper
+            # thread so the caller still returns immediately.
+            threading.Thread(target=self._release, daemon=True).start()
+
+    def _release(self):
+        """Stop the worker and listener, then unmap and destroy the segments."""
+        self._worker.join()
+        # only stop the listener once the worker is gone and no further results
+        # can land on the queue
+        self._response_queue.put(None)
+        self._listener.join()
+
+        # Held across the whole teardown, not just the flag check: a concurrent
+        # shutdown() must block until the segments are actually gone rather than
+        # return early on a flag that is set but not yet acted on. (An Event is
+        # the wrong primitive here — is_set()/set() is a check-then-act, so two
+        # callers can both reach unlink() and the second raises FileNotFoundError.)
+        with self._release_lock:
+            if self._released:
+                return
+            self._released = True
+
+            # drop the numpy views before unmapping the memory they point at
+            self._buffer = None
+
+            # _shared_mems is a tuple: 1 segment for rgb24/packed-yuv, 3 for
+            # planar yuv. close() releases this process's mapping; unlink()
+            # destroys the segment and must happen exactly once, from the owner
+            # — this process created them, so it unlinks and the worker only
+            # closes.
+            for shm in self._shared_mems:
+                shm.close()
+                shm.unlink()

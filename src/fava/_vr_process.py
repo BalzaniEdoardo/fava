@@ -9,9 +9,20 @@ import av
 import numpy as np
 
 from ._pyav_video_reader import VideoHandler, pyav_trim_plane
-from .utils import Colorspace, SharedMemRGB, SharedMemYUV, create_buffers
+from .utils import Colorspace, ReaderError, SharedMemRGB, SharedMemYUV, create_buffers
 
 logger = logging.getLogger(__name__)
+
+# Exact-type lookup, so a subclass falls through to ``unknown`` rather than
+# being silently reported as its base. The traceback is logged either way.
+_ERROR_CODES: dict[type[BaseException], ReaderError] = {
+    TypeError: ReaderError.type_error,
+    ValueError: ReaderError.value_error,
+    IndexError: ReaderError.index_error,
+    KeyError: ReaderError.key_error,
+    MemoryError: ReaderError.memory_error,
+    OSError: ReaderError.os_error,
+}
 
 
 def _reader_process(
@@ -58,39 +69,51 @@ def _reader_process(
             if rid < latest_rid.value:
                 continue
 
-            frame: av.VideoFrame = vr[index][0]
+            try:
+                decoded = vr[index]
+                # VideoHandler returns a list of frames for a slice but a bare
+                # frame for an int index; normalize to a single frame.
+                frame: av.VideoFrame = decoded[0] if isinstance(decoded, list) else decoded
 
-            # re-check after decode (decode can be slow; a newer request may
-            # have arrived in the meantime)
-            if rid < latest_rid.value:
-                continue
-
-            # TODO: Deal with n_frames changing
-            # if frame.shape != buf.shape or frame.dtype != dtype:
-            #     shared_mems.close()
-            #     shared_mems = SharedMemory(create=True, size=frame.nbytes)
-            #     buf = np.ndarray(frame.shape, dtype=frame.dtype, buffer=shared_mems.buf)
-            #     dtype = frame.dtype
-
-            with buffer_lock:
-                # final check before writing; if we've been superseded, don't
-                # clobber the buffer for whatever rid the listener may still be
-                # mid-read on
+                # re-check after decode (decode can be slow; a newer request may
+                # have arrived in the meantime)
                 if rid < latest_rid.value:
                     continue
 
-                if frame.format.name == Colorspace.rgb24:
-                    np.copyto(buffer, pyav_trim_plane(frame.planes[0]), casting="no")
+                # TODO: Deal with n_frames changing
+                # if frame.shape != buf.shape or frame.dtype != dtype:
+                #     shared_mems.close()
+                #     shared_mems = SharedMemory(create=True, size=frame.nbytes)
+                #     buf = np.ndarray(frame.shape, dtype=frame.dtype, buffer=shared_mems.buf)
+                #     dtype = frame.dtype
 
-                elif frame.format.name == Colorspace.yuv420p:
-                    if yuv_packed:
-                        np.copyto(buffer, frame.to_ndarray(), casting="no")
-                    else:
-                        np.copyto(buffer[0], pyav_trim_plane(frame.planes[0]), casting="no")
-                        np.copyto(buffer[1], pyav_trim_plane(frame.planes[1]), casting="no")
-                        np.copyto(buffer[2], pyav_trim_plane(frame.planes[2]), casting="no")
+                with buffer_lock:
+                    # final check before writing; if we've been superseded, don't
+                    # clobber the buffer for whatever rid the listener may still
+                    # be mid-read on
+                    if rid < latest_rid.value:
+                        continue
 
-                response_queue.put(rid)
+                    if frame.format.name == Colorspace.rgb24:
+                        np.copyto(buffer, pyav_trim_plane(frame.planes[0]), casting="no")
+
+                    elif frame.format.name == Colorspace.yuv420p:
+                        if yuv_packed:
+                            np.copyto(buffer, frame.to_ndarray(), casting="no")
+                        else:
+                            np.copyto(buffer[0], pyav_trim_plane(frame.planes[0]), casting="no")
+                            np.copyto(buffer[1], pyav_trim_plane(frame.planes[1]), casting="no")
+                            np.copyto(buffer[2], pyav_trim_plane(frame.planes[2]), casting="no")
+
+                    response_queue.put((rid, ReaderError.ok))
+
+            except Exception as exc:
+                # A failed request must never kill the worker: the parent is
+                # blocked on a future that only this loop can resolve, so dying
+                # here turns any bug into a permanent hang. Report the category
+                # back and keep serving; the traceback goes to the log.
+                logger.exception("[_reader_process] request %s failed", rid)
+                response_queue.put((rid, _ERROR_CODES.get(type(exc), ReaderError.unknown)))
     finally:
         try:
             if hasattr(vr, "close"):

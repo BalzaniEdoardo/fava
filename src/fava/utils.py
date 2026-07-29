@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 from multiprocessing.shared_memory import SharedMemory
 from typing import TypeAlias
 
@@ -19,6 +19,26 @@ SharedMemYUV: TypeAlias = tuple[SharedMemory, SharedMemory, SharedMemory]
 class Colorspace(StrEnum):
     rgb24 = "rgb24"
     yuv420p = "yuv420p"
+
+
+class ReaderError(IntEnum):
+    """Outcome of a single reader request, as sent back to the parent process.
+
+    Only this category crosses the process boundary; the full traceback is
+    logged in the worker. Keeping the response a pair of ints means it is
+    always serializable, so the reply can never be lost to a pickling failure
+    in ``multiprocessing.Queue``'s feeder thread — which would leave the caller
+    waiting on a future that never resolves.
+    """
+
+    ok = 0
+    unknown = 1
+    type_error = 2
+    value_error = 3
+    index_error = 4
+    key_error = 5
+    memory_error = 6
+    os_error = 7
 
 
 def create_shared_memory(

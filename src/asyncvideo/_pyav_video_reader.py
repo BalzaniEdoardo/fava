@@ -299,6 +299,15 @@ class VideoHandler(BaseAudioVideo):
         self._time_input = None if time is None else np.asarray(time)
         self._time_future: Future[NDArray] = Future()
 
+        # Most containers declare their frame count, so a mismatched ``time``
+        # array can be rejected here — at the line that passed it — rather than
+        # later, from whichever call first needs a timestamp. Containers that
+        # declare nothing (vp9/webm report 0) are still checked by
+        # ``_resolve_time`` once the indexer has counted the frames, which stays
+        # the authoritative check: a header count can disagree with reality.
+        if self._time_provided and self.stream.frames > 0:
+            self._check_time_length(len(self._time_input), self.stream.frames)
+
         # initialize index for last decoded frame
         # if sampling of other signals (LFP) is much denser, multiple times the frame
         # is unchanged, so cache the idx
@@ -503,6 +512,15 @@ class VideoHandler(BaseAudioVideo):
             self._resolve_time()
             self._index_ready.set()
 
+    @staticmethod
+    def _check_time_length(n_times: int, n_frames: int) -> None:
+        """Raise if a provided ``time`` array does not have one entry per frame."""
+        if n_times != n_frames:
+            raise ValueError(
+                f"the provided time array has length {n_times}, but the video has "
+                f"{n_frames} frames; pass one timestamp per frame"
+            )
+
     def _resolve_time(self):
         """Publish the frame times through ``_time_future``.
 
@@ -514,12 +532,7 @@ class VideoHandler(BaseAudioVideo):
             return
         try:
             if self._time_provided:
-                if len(self._time_input) != self._i:
-                    raise ValueError(
-                        f"the provided time array has length "
-                        f"{len(self._time_input)}, but the video has {self._i} "
-                        f"frames; pass one timestamp per frame"
-                    )
+                self._check_time_length(len(self._time_input), self._i)
                 self._time_future.set_result(self._time_input)
                 return
 

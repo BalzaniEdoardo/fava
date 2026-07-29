@@ -1,10 +1,13 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "asyncvideo"
-version = "0.1.0"
+# the version comes from the git tag, via setuptools_scm -- see [tool.setuptools_scm].
+# tagging 0.1.0 is what makes the release 0.1.0; there is no version to bump here,
+# and so no way for the two to disagree.
+dynamic = ["version"]
 description = "Async video reader with fast random frame access."
 readme = "README.md"
 license = { text = "MIT" }
@@ -31,8 +34,16 @@ docs = [
     "matplotlib",
     "fastplotlib",
     "glfw",  # windowing backend fastplotlib renders into
+    "pooch",  # downloads and hash-verifies the example clips
+    "tqdm",  # download progress bar
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["asyncvideo"]
+
+[tool.setuptools_scm]
+# Building from a directory with no git metadata -- an unpacked sdist, say -- cannot
+# know the version, so fall back rather than failing the build. A release always
+# builds from a tagged checkout, so this value should never reach PyPI.
+fallback_version = "0.0.0"

@@ -42,10 +42,16 @@ jobs:
         # setuptools_scm derives the version from the tag, so these should always
         # agree -- but a shallow clone or a missing tag would silently produce a
         # dev version like 0.1.dev3+g1234567, and PyPI does not allow reuploads.
-        # =~ is bash's regex operator: succeed if the sdist name ends in the most
-        # recent tag, fail if it does not.
+        #
+        # ${tag#v} strips a leading "v", because setuptools_scm does the same when
+        # it builds the version: tagging v0.1.0 still produces asyncvideo-0.1.0,
+        # so comparing against the raw tag would fail for that tag style.
+        # =~ is bash's regex operator: succeed if the sdist name ends in the
+        # version, fail if it does not.
         run: |
-          [[ "$(ls dist/*tar.gz)" =~ "-$(git describe --tags).tar.gz" ]]
+          tag=$(git describe --tags)
+          echo "tag: $tag  ->  expecting version ${tag#v}"
+          [[ "$(ls dist/*tar.gz)" =~ "-${tag#v}.tar.gz" ]]
 
       - name: Install FFmpeg
         # the test videos are encoded rather than committed

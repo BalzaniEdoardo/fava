@@ -375,7 +375,7 @@ class VideoHandler(BaseAudioVideo):
             stream = container.streams.video[stream_index]
             stream.codec_context.skip_frame = "NONKEY"
 
-            for frame_index, frame in enumerate(container.decode(stream)):
+            for frame in container.decode(stream):
                 if not self._running:
                     return
                 keyframe_timestamp.append(frame.time)

@@ -1,4 +1,3 @@
-import os
 import pathlib
 
 import nox
@@ -11,12 +10,14 @@ def linters(session):
     session.run("ruff", "check", "src", "--ignore", "D")
     session.run("ruff", "check", "tests", "--ignore", "D")
 
+
 @nox.session(name="linters-fix", reuse_venv=True)
 def linters_fix(session):
     """Run linters and auto-fix issues"""
     session.install("-e", ".[dev]")
     session.run("ruff", "check", "src", "--ignore", "D", "--fix")
     session.run("ruff", "check", "tests", "--ignore", "D", "--fix")
+
 
 @nox.session(name="video_gen", reuse_venv=True)
 def video_gen(session):
@@ -54,5 +55,5 @@ def tests(session):
         *cov_args,
         env={
             "WGPU_FORCE_OFFSCREEN": "1",
-        }
+        },
     )

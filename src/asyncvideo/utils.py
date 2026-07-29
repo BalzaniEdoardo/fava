@@ -81,7 +81,7 @@ def create_buffers(
     shape_frame: tuple[int, int],
     shape_chroma: tuple[int, int] | None,
     n_frames: int = 1,
-    yuv_packed: bool = False
+    yuv_packed: bool = False,
 ) -> UInt8Array | TupleYUV:
     if colorspace == Colorspace.yuv420p:
         if yuv_packed:

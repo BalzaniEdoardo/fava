@@ -12,6 +12,7 @@ import numpy as np
 
 from ._pyav_video_reader import VideoHandler
 from ._vr_process import _reader_process
+from .convert import to_rgb
 from .utils import (
     Colorspace,
     FutureArray,
@@ -36,10 +37,10 @@ class AsyncVideoReader:
         return self
 
     def __init__(
-            self,
-            path: str | Path,
-            yuv_packed: bool = False,
-            **kwargs,
+        self,
+        path: str | Path,
+        yuv_packed: bool = False,
+        **kwargs,
     ):
         self._path = Path(path)
         self._kwargs = kwargs
@@ -47,8 +48,9 @@ class AsyncVideoReader:
         vr = VideoHandler(self._path, pixel_format=None)
         frame0 = vr[(slice(0, 1),)][0]
 
-        # width, height to rows, cols
-        self._shape_frame = vr.shape[2], vr.shape[1]
+        # take the pixel grid from the frame itself: VideoHandler.shape reports the
+        # native to_ndarray() layout here, which for yuv420p is (h * 3 // 2, w)
+        self._shape_frame = frame0.height, frame0.width
         n_frames = vr.shape[0]
 
         colorspace = Colorspace(frame0.format.name)
@@ -63,13 +65,18 @@ class AsyncVideoReader:
 
         elif self.colorspace == Colorspace.yuv420p:
             self._shape = (n_frames, *self._shape_frame)
-            self._shape_chroma = frame0.format.chroma_height(), frame0.format.chroma_width()
+            self._shape_chroma = (
+                frame0.format.chroma_height(),
+                frame0.format.chroma_width(),
+            )
 
         n_frames = 1
 
         self._yuv_packed = yuv_packed
 
-        self._shared_mems = create_shared_memory(frame0, n_frames=n_frames, yuv_packed=self._yuv_packed)
+        self._shared_mems = create_shared_memory(
+            frame0, n_frames=n_frames, yuv_packed=self._yuv_packed
+        )
         shared_mem_names = tuple(b.name for b in self.shared_mems)
 
         vr.close()
@@ -137,6 +144,32 @@ class AsyncVideoReader:
     @property
     def shape(self) -> tuple[int, ...]:
         return self._shape
+
+    def to_rgb(self, frames) -> np.ndarray:
+        """
+        Convert a resolved request from this reader to RGB.
+
+        Same as the module-level `asyncvideo.to_rgb`, except that the source
+        format is taken from this reader's ``colorspace``.
+
+        Parameters
+        ----------
+        frames :
+            The result of a future returned by ``__getitem__`` — either a
+            ``(Y, U, V)`` plane tuple or, with ``yuv_packed=True``, a packed
+            array.
+
+        Returns
+        -------
+        :
+            ``(n, H, W, 3)`` uint8.
+
+        Examples
+        --------
+        >>> reader = AsyncVideoReader("example.mp4")  # doctest: +SKIP
+        >>> rgb = reader.to_rgb(reader[(10,)].result())  # doctest: +SKIP
+        """
+        return to_rgb(frames, from_format=str(self.colorspace))
 
     @property
     def dtype(self) -> np.dtype:

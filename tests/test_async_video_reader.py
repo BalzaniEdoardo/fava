@@ -64,6 +64,7 @@ def _wait_until(predicate, timeout: float) -> bool:
 # Decoding correctness — the reader must return the frame that was asked for
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.parametrize("idx", [0, 5, 42, 99])
 def test_int_index_returns_correct_frame(reader, reference, idx):
     """An int index must decode, not hang, and return the *right* frame.
@@ -106,6 +107,7 @@ def test_packed_yuv_matches_reference(video_path, reference):
 # Worker failure — must surface as an exception, never as a hang
 # ---------------------------------------------------------------------------
 
+
 def test_failed_request_raises_instead_of_hanging(reader):
     """A request the worker cannot serve must fail the future.
 
@@ -135,6 +137,7 @@ def test_worker_survives_failed_request(reader, reference):
 # ---------------------------------------------------------------------------
 # Shutdown — segments released exactly once, whatever the caller does
 # ---------------------------------------------------------------------------
+
 
 def test_shutdown_unlinks_all_segments(reader):
     names = _segment_names(reader)
@@ -206,7 +209,9 @@ def test_concurrent_shutdown_blocks_and_releases_exactly_once(reader):
     first.start()
 
     # first thread is now inside the critical section, holding the lock
-    assert lock.first_holder_inside.wait(RELEASE_TIMEOUT), "first shutdown never started"
+    assert lock.first_holder_inside.wait(RELEASE_TIMEOUT), (
+        "first shutdown never started"
+    )
 
     second = threading.Thread(target=call_shutdown)
     second.start()

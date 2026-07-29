@@ -281,6 +281,9 @@ class VideoHandler(BaseAudioVideo):
         # seek decisions.  current_frame can be updated by buffer / cache hits
         # without advancing the stream, so it must not be used for this purpose.
         self._stream_pts: int | None = None
+        # True once the stream has been decoded to exhaustion: the decoder is
+        # flushed and must be re-seeked before it will accept another packet
+        self._at_eof = False
         self.stream = self.container.streams.video[stream_index]
         self.stream_index = stream_index
         self.pixel_format = pixel_format
@@ -702,12 +705,13 @@ class VideoHandler(BaseAudioVideo):
 
         target_pts, use_time = self._get_target_frame_pts(idx)
 
-        if self._stream_pts is None or self._need_seek_call(
-            self._stream_pts, target_pts
+        if (
+            self._stream_pts is None
+            # a decoder left at EOF cannot be decoded from, whatever the target
+            or self._at_eof
+            or self._need_seek_call(self._stream_pts, target_pts)
         ):
-            self.container.seek(
-                int(target_pts), backward=True, any_frame=False, stream=self.stream
-            )
+            self._seek(target_pts)
 
         # Decode forward from the keyframe until the frame just before (or equal to) target_pts
         _, preceding_frame = self._decode_and_check_frames(use_time, target_pts, idx)
@@ -724,8 +728,32 @@ class VideoHandler(BaseAudioVideo):
             else self.current_frame
         )
 
+    def _seek(self, target_pts: int) -> None:
+        """Seek to the keyframe at or before ``target_pts``.
+
+        Seeking flushes the decoder, so it is also how the reader recovers from
+        having previously run the stream to EOF.
+        """
+        self.container.seek(
+            int(target_pts), backward=True, any_frame=False, stream=self.stream
+        )
+        self._at_eof = False
+
     def _decode_and_check_frames(self, use_time: bool, target_pts: int, idx: int):
-        """Decode from stream."""
+        """Decode from stream, recovering once if the decoder is already at EOF."""
+        try:
+            return self._scan_for_frame(use_time, target_pts, idx)
+        except EOFError:
+            # The decoder was left at EOF by an earlier read that had to scan the
+            # whole stream, and PyAV raises rather than yielding nothing when a
+            # packet is sent to it in that state. A seek flushes it; retry once.
+            # Not recursive on purpose: exactly one retry, so a genuinely
+            # unreadable target still surfaces instead of looping.
+            self._seek(target_pts)
+            return self._scan_for_frame(use_time, target_pts, idx)
+
+    def _scan_for_frame(self, use_time: bool, target_pts: int, idx: int):
+        """Decode forward from the current position looking for ``target_pts``."""
         preceding_frame = None
         last_idx = self.last_loaded_idx
         frame_duration = 1 / float(self.stream.average_rate)
@@ -747,6 +775,13 @@ class VideoHandler(BaseAudioVideo):
                 current_frame = frame
                 return last_idx, current_frame
             preceding_frame = frame
+
+        # Falling out of the loop means the generator was exhausted, so the
+        # container and codec are now at EOF. This happens routinely on B-frame
+        # codecs when the target is near the end of the stream, since packets
+        # arrive in decode order rather than display order. Record it: the next
+        # decode must re-seek first or PyAV raises EOFError.
+        self._at_eof = True
         return last_idx, preceding_frame
 
     @property

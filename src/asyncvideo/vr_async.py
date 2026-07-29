@@ -232,7 +232,31 @@ class AsyncVideoReader:
                             )
                         )
 
+    @staticmethod
+    def _frame_index(index):
+        """Extract the frame selector from an index.
+
+        Accepts ``reader[i]`` and ``reader[i:j]`` as well as the tuple form
+        ``reader[(i,)]``, where only the first entry selects frames and any
+        remaining entries are spatial slices handled downstream.
+
+        Unpacking happens before ``__getitem__`` touches any state: it cancels
+        the previous request and bumps the request id, so an index that cannot
+        even be unpacked must fail before that, not halfway through.
+        """
+        if isinstance(index, tuple):
+            if not index:
+                raise IndexError("an empty tuple is not a valid frame index")
+            index = index[0]
+        if isinstance(index, np.integer):
+            return int(index)
+        # anything else (including a plain int or slice) is forwarded as-is; the
+        # worker reports an unservable index by failing the future
+        return index
+
     def __getitem__(self, index) -> FutureArray:
+        frame_index = self._frame_index(index)
+
         with self._listener_lock:
             if self._pending_future is not None and not self._pending_future.done():
                 self._pending_future.cancel()
@@ -254,7 +278,7 @@ class AsyncVideoReader:
             except _stdlib_queue.Empty:
                 break
 
-        self._request_queue.put((self._pending_rid, index[0]))
+        self._request_queue.put((self._pending_rid, frame_index))
         return future
 
     def shutdown(self, wait: bool = True):

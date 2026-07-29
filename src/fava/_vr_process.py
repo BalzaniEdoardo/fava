@@ -94,7 +94,11 @@ def _reader_process(
                 vr.close()
         except Exception as e:
             print(f"[_reader_process] Failed to close video reader: {e}")
-        try:
-            shared_mems.close()
-        except Exception:
-            pass
+        # shared_mems is a tuple: 1 segment for rgb24/packed-yuv, 3 for planar
+        # yuv. Only close() here — the parent created the segments and is the
+        # one that unlink()s them, and unlink() must happen exactly once.
+        for shm in shared_mems:
+            try:
+                shm.close()
+            except Exception as e:
+                print(f"[_reader_process] Failed to close shared memory {shm.name}: {e}")

@@ -205,5 +205,10 @@ class AsyncVideoReader:
             self._worker.join()
             self._response_queue.put(None)
             self._listener.join()
-        self._shared_mems.unlink()
-        self._shared_mems.close()
+        # _shared_mems is a tuple: 1 segment for rgb24/packed-yuv, 3 for planar
+        # yuv. close() releases this process's mapping; unlink() destroys the
+        # segment and must happen exactly once, from the owner — this process
+        # created them, so it unlinks and the worker only closes.
+        for shm in self._shared_mems:
+            shm.close()
+            shm.unlink()

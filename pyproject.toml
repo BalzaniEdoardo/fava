@@ -31,6 +31,7 @@ docs = [
     "matplotlib",
     "fastplotlib",
     "glfw",  # windowing backend fastplotlib renders into
+    "ONE-api",  # fetches the public IBL session used by the examples
 ]
 
 [tool.setuptools.packages.find]

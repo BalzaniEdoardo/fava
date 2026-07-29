@@ -26,21 +26,23 @@ _ERROR_CODES: dict[type[BaseException], ReaderError] = {
 
 
 def _reader_process(
-        path: Path,
-        shared_mem_names: str,
-        colorspace: Colorspace,
-        shape_frame: tuple[int, int],
-        shape_chroma: tuple[int, int] | None,
-        yuv_packed: bool,
-        request_queue: Queue,
-        response_queue: Queue,
-        stop_event: Event,
-        latest_rid: Synchronized,
-        buffer_lock: Lock,
+    path: Path,
+    shared_mem_names: str,
+    colorspace: Colorspace,
+    shape_frame: tuple[int, int],
+    shape_chroma: tuple[int, int] | None,
+    yuv_packed: bool,
+    request_queue: Queue,
+    response_queue: Queue,
+    stop_event: Event,
+    latest_rid: Synchronized,
+    buffer_lock: Lock,
 ):
     vr = VideoHandler(path, pixel_format=None)
 
-    shared_mems: SharedMemRGB | SharedMemYUV = tuple(SharedMemory(name=n) for n in shared_mem_names)
+    shared_mems: SharedMemRGB | SharedMemYUV = tuple(
+        SharedMemory(name=n) for n in shared_mem_names
+    )
 
     buffer = create_buffers(
         shared_mems,
@@ -73,7 +75,9 @@ def _reader_process(
                 decoded = vr[index]
                 # VideoHandler returns a list of frames for a slice but a bare
                 # frame for an int index; normalize to a single frame.
-                frame: av.VideoFrame = decoded[0] if isinstance(decoded, list) else decoded
+                frame: av.VideoFrame = (
+                    decoded[0] if isinstance(decoded, list) else decoded
+                )
 
                 # re-check after decode (decode can be slow; a newer request may
                 # have arrived in the meantime)
@@ -95,15 +99,29 @@ def _reader_process(
                         continue
 
                     if frame.format.name == Colorspace.rgb24:
-                        np.copyto(buffer, pyav_trim_plane(frame.planes[0]), casting="no")
+                        np.copyto(
+                            buffer, pyav_trim_plane(frame.planes[0]), casting="no"
+                        )
 
                     elif frame.format.name == Colorspace.yuv420p:
                         if yuv_packed:
                             np.copyto(buffer, frame.to_ndarray(), casting="no")
                         else:
-                            np.copyto(buffer[0], pyav_trim_plane(frame.planes[0]), casting="no")
-                            np.copyto(buffer[1], pyav_trim_plane(frame.planes[1]), casting="no")
-                            np.copyto(buffer[2], pyav_trim_plane(frame.planes[2]), casting="no")
+                            np.copyto(
+                                buffer[0],
+                                pyav_trim_plane(frame.planes[0]),
+                                casting="no",
+                            )
+                            np.copyto(
+                                buffer[1],
+                                pyav_trim_plane(frame.planes[1]),
+                                casting="no",
+                            )
+                            np.copyto(
+                                buffer[2],
+                                pyav_trim_plane(frame.planes[2]),
+                                casting="no",
+                            )
 
                     response_queue.put((rid, ReaderError.ok))
 
@@ -113,7 +131,9 @@ def _reader_process(
                 # here turns any bug into a permanent hang. Report the category
                 # back and keep serving; the traceback goes to the log.
                 logger.exception("[_reader_process] request %s failed", rid)
-                response_queue.put((rid, _ERROR_CODES.get(type(exc), ReaderError.unknown)))
+                response_queue.put(
+                    (rid, _ERROR_CODES.get(type(exc), ReaderError.unknown))
+                )
     finally:
         try:
             if hasattr(vr, "close"):

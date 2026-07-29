@@ -6,6 +6,7 @@ from asyncvideo._pyav_video_reader import FrameBuffer
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _frames(n):
     """Return n distinct sentinel objects standing in for av.VideoFrame."""
     return [object() for _ in range(n)]
@@ -14,6 +15,7 @@ def _frames(n):
 # ---------------------------------------------------------------------------
 # Basic get / put
 # ---------------------------------------------------------------------------
+
 
 def test_get_miss_returns_none():
     buf = FrameBuffer(maxsize=4)
@@ -48,6 +50,7 @@ def test_multiple_entries_retrieved_correctly():
 # Duplicate put
 # ---------------------------------------------------------------------------
 
+
 def test_duplicate_put_does_not_overwrite():
     """Putting the same index twice keeps the first frame (no-op on duplicate)."""
     buf = FrameBuffer(maxsize=4)
@@ -68,6 +71,7 @@ def test_duplicate_put_does_not_grow_cache():
 # ---------------------------------------------------------------------------
 # FIFO eviction
 # ---------------------------------------------------------------------------
+
 
 def test_fifo_evicts_oldest_when_full():
     buf = FrameBuffer(maxsize=3)
@@ -104,6 +108,7 @@ def test_size_never_exceeds_maxsize():
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
 
 def test_maxsize_one():
     buf = FrameBuffer(maxsize=1)

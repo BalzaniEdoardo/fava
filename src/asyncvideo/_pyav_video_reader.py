@@ -3,6 +3,7 @@ Base class for audio and video handling.
 
 Handles opening/closing the stream, seeking, and keyframe extraction.
 """
+
 from __future__ import annotations
 
 import abc
@@ -18,6 +19,8 @@ from typing import Literal
 import av
 import numpy as np
 from numpy.typing import NDArray
+
+from .convert import to_rgb
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +66,19 @@ class FrameBuffer:
 
     def __repr__(self):
         if len(self._cache) <= 1:
-            return "".join(["FrameBuffer("] + [f"{k}: {v}" for k,v in self._cache.items()] + [")"])
-        return "".join(["FrameBuffer(\n"] + [f"\t{k}: {v}\n" for k,v in self._cache.items()] + [")"])
+            return "".join(
+                ["FrameBuffer("] + [f"{k}: {v}" for k, v in self._cache.items()] + [")"]
+            )
+        return "".join(
+            ["FrameBuffer(\n"]
+            + [f"\t{k}: {v}\n" for k, v in self._cache.items()]
+            + [")"]
+        )
 
 
-
-def _needs_flush(count_keyframes: int, temp: list, has_b_frames: bool , n_b_frames: int = 1) -> bool:
+def _needs_flush(
+    count_keyframes: int, temp: list, has_b_frames: bool, n_b_frames: int = 1
+) -> bool:
     """True when the buffered GOP / batch is ready to commit to the index.
 
     Parameters
@@ -86,9 +96,8 @@ def _needs_flush(count_keyframes: int, temp: list, has_b_frames: bool , n_b_fram
         return (count_keyframes == n_b_frames) and bool(temp)
     return len(temp) >= _INDEX_FLUSH_EVERY
 
-def pyav_trim_plane(
-        plane, bytes_per_pixel=1, dtype="uint8"
-):
+
+def pyav_trim_plane(plane, bytes_per_pixel=1, dtype="uint8"):
     """
     Adapted from pyav
 
@@ -117,8 +126,8 @@ class BaseAudioVideo:
     _thread_local = threading.local()
 
     def __init__(
-            self,
-            path: str | pathlib.Path,
+        self,
+        path: str | pathlib.Path,
     ) -> None:
         self._thread_local.get_from_index = False
         self.file_path = pathlib.Path(path)
@@ -134,7 +143,9 @@ class BaseAudioVideo:
 
         self._keyframe_pts = []
         self._pts_keyframe_ready = threading.Event()
-        self._keyframe_thread = threading.Thread(target=self._extract_keyframes_pts, daemon=True)
+        self._keyframe_thread = threading.Thread(
+            target=self._extract_keyframes_pts, daemon=True
+        )
         self._keyframe_thread.start()
 
     @abc.abstractmethod
@@ -158,7 +169,10 @@ class BaseAudioVideo:
             # Once the thread is done the list is complete: no keyframe beyond
             # the last known one exists, so the absence of one is not a reason
             # to seek — we can stream forward safely.
-            if not self._pts_keyframe_ready.is_set() and self._keyframe_pts[-1] < target_frame_pts:
+            if (
+                not self._pts_keyframe_ready.is_set()
+                and self._keyframe_pts[-1] < target_frame_pts
+            ):
                 return True
 
         # roll back the stream if audiovideo is scrolled backwards
@@ -222,8 +236,9 @@ class VideoHandler(BaseAudioVideo):
         uniform grid is generated from the stream's average rate.
     pixel_format :
         PyAV pixel format string for decoded frames. Supported values are
-        ``"rgb24"`` (default) and ``"yuv420p"``. Pass ``None`` to skip
-        conversion and return raw `av.VideoFrame` instances.
+        ``"rgb24"``, ``"yuv420p"`` and ``"yuv444p"``. The default is ``None``,
+        which skips conversion and returns raw `av.VideoFrame` instances; pass
+        an explicit format to get numpy arrays instead.
     buffer_size :
         Number of recently decoded frames to keep in the FIFO frame buffer.
         On a cache hit the frame is returned without any seeking or decoding.
@@ -232,7 +247,12 @@ class VideoHandler(BaseAudioVideo):
     Examples
     --------
     >>> from asyncvideo import VideoHandler
-    >>> vh = VideoHandler("example.mp4")  # doctest: +SKIP
+    >>> # Pass a pixel_format to get numpy arrays; the default returns
+    >>> # raw av.VideoFrame objects instead.
+    >>> vh = VideoHandler("example.mp4", pixel_format="rgb24")  # doctest: +SKIP
+    >>> # Shape: (n_frames, height, width, channels)
+    >>> vh.shape  # doctest: +SKIP
+    (100, 480, 640, 3)
     >>> # Get the frame at 1.5 seconds.
     >>> frame = vh.get(1.5)  # doctest: +SKIP
     >>> # Shape: (height, width, channels)
@@ -261,6 +281,9 @@ class VideoHandler(BaseAudioVideo):
         # seek decisions.  current_frame can be updated by buffer / cache hits
         # without advancing the stream, so it must not be used for this purpose.
         self._stream_pts: int | None = None
+        # True once the stream has been decoded to exhaustion: the decoder is
+        # flushed and must be re-seeked before it will accept another packet
+        self._at_eof = False
         self.stream = self.container.streams.video[stream_index]
         self.stream_index = stream_index
         self.pixel_format = pixel_format
@@ -271,7 +294,9 @@ class VideoHandler(BaseAudioVideo):
             self._time_provided = False
             n_frames = self.stream.frames
             frame_duration = 1 / float(self.stream.average_rate)
-            self.time = np.linspace(0, frame_duration * n_frames - frame_duration, n_frames)
+            self.time = np.linspace(
+                0, frame_duration * n_frames - frame_duration, n_frames
+            )
         else:
             # TODO : check that number of time point matches number of frames
             self._time_provided = True
@@ -284,6 +309,10 @@ class VideoHandler(BaseAudioVideo):
 
         # initialize current frame
         self.current_frame: av.VideoFrame | None = None
+
+        # measured lazily from the first decoded frame when pixel_format is None,
+        # since the native layout is only knowable from a real frame
+        self._native_frame_shape: tuple[int, ...] | None = None
 
         if self.file_path.suffix == ".mkv":
             # mkv time is rounded to 3 digits, at least in the example video
@@ -300,7 +329,9 @@ class VideoHandler(BaseAudioVideo):
         self._i = 0  # number of committed (valid) PTS entries
         # None means the total frame count is not yet known (e.g. vp9/webm);
         # set to the final count by _build_index before signalling _index_ready.
-        self._n_frames: int | None = self.stream.frames if self.stream.frames > 0 else None
+        self._n_frames: int | None = (
+            self.stream.frames if self.stream.frames > 0 else None
+        )
         self._index_thread = threading.Thread(target=self._build_index, daemon=True)
 
         self._index_ready = threading.Event()
@@ -335,7 +366,7 @@ class VideoHandler(BaseAudioVideo):
         return np.clip(idx, 0, len(time) - 1)
 
     def _extract_keyframe_times_and_points(
-            self, video_path: str | pathlib.Path, stream_index: int = 0, first_only=False
+        self, video_path: str | pathlib.Path, stream_index: int = 0, first_only=False
     ) -> tuple[NDArray, NDArray] | None:
         """
         Extract the indices and timestamps of keyframes from a video file.
@@ -437,10 +468,11 @@ class VideoHandler(BaseAudioVideo):
                     def update(extracted_pts):
                         chunk = process(extracted_pts)
                         with self._lock:
-                            self.all_pts[self._i: self._i + len(chunk)] = chunk
+                            self.all_pts[self._i : self._i + len(chunk)] = chunk
                             self._i += len(chunk)
                         extracted_pts.clear()
                 else:
+
                     def update(extracted_pts):
                         chunk = process(extracted_pts)
                         with self._lock:
@@ -482,7 +514,9 @@ class VideoHandler(BaseAudioVideo):
                 self.time = np.linspace(self.time[0], self.time[-1], self._i)
             elif not self._time_provided and len(self.time) != self._i:
                 frame_duration = 1 / float(self.stream.average_rate)
-                self.time = np.linspace(0, frame_duration * self._i - frame_duration, self._i)
+                self.time = np.linspace(
+                    0, frame_duration * self._i - frame_duration, self._i
+                )
 
             self._index_ready.set()
 
@@ -671,10 +705,13 @@ class VideoHandler(BaseAudioVideo):
 
         target_pts, use_time = self._get_target_frame_pts(idx)
 
-        if self._stream_pts is None or self._need_seek_call(self._stream_pts, target_pts):
-            self.container.seek(
-                int(target_pts), backward=True, any_frame=False, stream=self.stream
-            )
+        if (
+            self._stream_pts is None
+            # a decoder left at EOF cannot be decoded from, whatever the target
+            or self._at_eof
+            or self._need_seek_call(self._stream_pts, target_pts)
+        ):
+            self._seek(target_pts)
 
         # Decode forward from the keyframe until the frame just before (or equal to) target_pts
         _, preceding_frame = self._decode_and_check_frames(use_time, target_pts, idx)
@@ -691,8 +728,32 @@ class VideoHandler(BaseAudioVideo):
             else self.current_frame
         )
 
+    def _seek(self, target_pts: int) -> None:
+        """Seek to the keyframe at or before ``target_pts``.
+
+        Seeking flushes the decoder, so it is also how the reader recovers from
+        having previously run the stream to EOF.
+        """
+        self.container.seek(
+            int(target_pts), backward=True, any_frame=False, stream=self.stream
+        )
+        self._at_eof = False
+
     def _decode_and_check_frames(self, use_time: bool, target_pts: int, idx: int):
-        """Decode from stream."""
+        """Decode from stream, recovering once if the decoder is already at EOF."""
+        try:
+            return self._scan_for_frame(use_time, target_pts, idx)
+        except EOFError:
+            # The decoder was left at EOF by an earlier read that had to scan the
+            # whole stream, and PyAV raises rather than yielding nothing when a
+            # packet is sent to it in that state. A seek flushes it; retry once.
+            # Not recursive on purpose: exactly one retry, so a genuinely
+            # unreadable target still surfaces instead of looping.
+            self._seek(target_pts)
+            return self._scan_for_frame(use_time, target_pts, idx)
+
+    def _scan_for_frame(self, use_time: bool, target_pts: int, idx: int):
+        """Decode forward from the current position looking for ``target_pts``."""
         preceding_frame = None
         last_idx = self.last_loaded_idx
         frame_duration = 1 / float(self.stream.average_rate)
@@ -702,25 +763,39 @@ class VideoHandler(BaseAudioVideo):
             if frame.pts is None:
                 continue
             if (not use_time and frame.pts > target_pts) or (
-                    use_time and frame.time > time_threshold
+                use_time and frame.time > time_threshold
             ):
                 last_idx = idx
                 current_frame = preceding_frame or frame
                 return last_idx, current_frame
             elif (not use_time and frame.pts == target_pts) or (
-                    use_time and frame.time == time_threshold
+                use_time and frame.time == time_threshold
             ):
                 last_idx = idx
                 current_frame = frame
                 return last_idx, current_frame
             preceding_frame = frame
+
+        # Falling out of the loop means the generator was exhausted, so the
+        # container and codec are now at EOF. This happens routinely on B-frame
+        # codecs when the target is near the end of the stream, since packets
+        # arrive in decode order rather than display order. Record it: the next
+        # decode must re-seek first or PyAV raises EOFError.
+        self._at_eof = True
         return last_idx, preceding_frame
 
     @property
-    def shape(self) -> tuple[int, int, int]:
+    def shape(self) -> tuple[int, ...]:
         """
         :
-            Shape of the video, ``(n_frames, width, height)``.
+            Shape of the video, matching the array returned by indexing:
+            ``(n_frames, height, width, 3)`` for ``pixel_format="rgb24"``,
+            ``(n_frames, height * 3 // 2, width)`` for ``"yuv420p"``, and
+            ``(n_frames, 3, height, width)`` for ``"yuv444p"``. When
+            ``pixel_format`` is ``None``, frames are returned as
+            `av.VideoFrame` and the trailing dimensions are those of
+            ``frame.to_ndarray()`` in the stream's native format, measured
+            from the first decoded frame.
 
         Notes
         -----
@@ -730,7 +805,54 @@ class VideoHandler(BaseAudioVideo):
         """
         if self._n_frames is None:
             self._wait_for_all_pts()
-        return self._n_frames, self.stream.width, self.stream.height
+        return self._n_frames, *self._frame_shape
+
+    def to_rgb(self, frames) -> NDArray:
+        """
+        Convert frames returned by this reader to RGB.
+
+        Same as the module-level `asyncvideo.to_rgb`, except that the source
+        format is taken from this reader rather than passed in: whatever
+        ``pixel_format`` was requested, or — when that is ``None`` — the
+        stream's native format, read off a decoded frame.
+
+        Parameters
+        ----------
+        frames :
+            Any output of `get` or ``__getitem__`` on this reader.
+
+        Returns
+        -------
+        :
+            ``(H, W, 3)`` uint8 for a single frame, ``(n, H, W, 3)`` for a stack.
+
+        Examples
+        --------
+        >>> vh = VideoHandler("example.mp4", pixel_format="yuv444p")  # doctest: +SKIP
+        >>> # (3, H, W) on its own is ambiguous, but the reader knows the format
+        >>> rgb = vh.to_rgb(vh[7])  # doctest: +SKIP
+        """
+        from_format = self.pixel_format
+        if from_format is None and self.current_frame is not None:
+            # frames are av.VideoFrame here, which to_rgb reads directly; this
+            # only matters if the caller already called to_ndarray() themselves
+            from_format = self.current_frame.format.name
+        return to_rgb(frames, from_format=from_format)
+
+    @property
+    def frame_shape(self) -> tuple[int, int]:
+        """
+        :
+            Pixel grid of a single frame, ``(height, width)``.
+
+        Notes
+        -----
+        - This is always the true frame size, independent of ``pixel_format``.
+          It therefore differs from the trailing entries of `shape` for the
+          packed layouts: a 480x640 ``yuv420p`` video has ``frame_shape``
+          ``(480, 640)`` while ``to_ndarray()`` returns ``(720, 640)``.
+        """
+        return self.stream.height, self.stream.width
 
     @property
     def _frame_shape(self) -> tuple[int, ...]:
@@ -742,6 +864,20 @@ class VideoHandler(BaseAudioVideo):
             return (h * 3 // 2, w)
         elif self.pixel_format == "yuv444p":
             return (3, h, w)
+        elif self.pixel_format is None:
+            # No conversion was requested, so ``to_ndarray()`` lays the frame out
+            # according to the stream's *native* format (yuv420p, gray, ...), not
+            # as (h, w, 3). Rather than mirror PyAV's format table here, measure
+            # it once on a real frame and cache the result.
+            if self._native_frame_shape is None:
+                if self.current_frame is None:
+                    # Called before the first decode (``shape`` is used during
+                    # __init__ to resolve n_frames). Report the pixel grid as a
+                    # provisional answer and leave the cache unset so the
+                    # measured shape wins as soon as a frame exists.
+                    return (h, w)
+                self._native_frame_shape = self.current_frame.to_ndarray().shape
+            return self._native_frame_shape
         else:
             raise ValueError(f"Unsupported pixel_format: {self.pixel_format!r}")
 
@@ -762,7 +898,7 @@ class VideoHandler(BaseAudioVideo):
             if not has_frames and not is_done_unpacking:
                 warnings.warn(
                     message="Video ``shape``, which corresponds to the number of frames, is being "
-                            "calculated runtime and will be updated.",
+                    "calculated runtime and will be updated.",
                     stacklevel=2,
                 )
             return self.time
@@ -850,9 +986,7 @@ class VideoHandler(BaseAudioVideo):
             target_pts, use_time = self._get_target_frame_pts(indices[collected])
 
             # Open a decoder (or re-open after a seek) when needed.
-            if decoder is None or (
-                self._need_seek_call(self._stream_pts, target_pts)
-            ):
+            if decoder is None or (self._need_seek_call(self._stream_pts, target_pts)):
                 self.container.seek(
                     int(target_pts), backward=True, any_frame=False, stream=self.stream
                 )
@@ -869,10 +1003,14 @@ class VideoHandler(BaseAudioVideo):
 
             time_threshold = time_threshold_all[collected]
             found_next = (
-                (frame.pts > target_pts) if not use_time else (frame.time > time_threshold)
+                (frame.pts > target_pts)
+                if not use_time
+                else (frame.time > time_threshold)
             )
             found_current = (
-                (frame.pts == target_pts) if not use_time else (frame.time == time_threshold)
+                (frame.pts == target_pts)
+                if not use_time
+                else (frame.time == time_threshold)
             )
 
             if found_next:
@@ -957,7 +1095,10 @@ class VideoHandler(BaseAudioVideo):
                     self._stream_pts, target_pts
                 ):
                     self.container.seek(
-                        int(target_pts), backward=True, any_frame=False, stream=self.stream
+                        int(target_pts),
+                        backward=True,
+                        any_frame=False,
+                        stream=self.stream,
                     )
 
                 frame_idx, frames, last_frame = self._decode_multiple(

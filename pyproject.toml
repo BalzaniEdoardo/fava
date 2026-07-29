@@ -26,6 +26,12 @@ dev = [
     "ruff",
     "matplotlib",
 ]
+# needed to run the examples and build the docs, not to use the package
+docs = [
+    "matplotlib",
+    "fastplotlib",
+    "glfw",  # windowing backend fastplotlib renders into
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

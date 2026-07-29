@@ -214,11 +214,13 @@ def test_seek_clears_eof_flag(video_info):
 
 
 @pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
-def test_stale_eof_flag_is_recovered(video_info):
-    """A read must succeed even if the decoder is marked EOF when it starts.
+def test_stale_eof_flag_still_reads_correctly(video_info):
+    """A set EOF flag forces a re-seek, which must not change what is returned.
 
-    Guards the recovery path in isolation: with the flag set, ``get`` is
-    obliged to re-seek before decoding rather than trusting the stream position.
+    Note this does not reproduce the EOF bug -- the decoder here is healthy and
+    only the flag is set, so it passes with or without the recovery logic. What
+    it pins is that the extra seek the flag triggers is harmless: the read still
+    lands on the right frame rather than on the keyframe before it.
     """
     frame_array, _, _, video_path = video_info
     with VideoHandler(video_path, time=np.arange(100)) as video:

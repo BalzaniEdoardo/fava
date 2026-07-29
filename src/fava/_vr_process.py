@@ -1,5 +1,5 @@
 import queue
-from multiprocessing import Queue, Event, Lock
+from multiprocessing import Event, Lock, Queue
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.sharedctypes import Synchronized
 from pathlib import Path
@@ -8,7 +8,7 @@ import av
 import numpy as np
 
 from ._pyav_video_reader import VideoHandler, pyav_trim_plane
-from .utils import SharedMemYUV, SharedMemRGB, Colorspace, create_buffers
+from .utils import Colorspace, SharedMemRGB, SharedMemYUV, create_buffers
 
 
 def _reader_process(

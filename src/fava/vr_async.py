@@ -1,19 +1,25 @@
 from __future__ import annotations
 
-from concurrent.futures import Future
 import multiprocessing
+import queue as _stdlib_queue
+import sys
+import threading
+from concurrent.futures import Future
 from multiprocessing import Queue
 from pathlib import Path
-import queue as _stdlib_queue
-import threading
-
-import sys
 
 import numpy as np
 
 from ._pyav_video_reader import VideoHandler
 from ._vr_process import _reader_process
-from .utils import Colorspace, FutureArray, SharedMemRGB, SharedMemYUV, create_shared_memory, create_buffers
+from .utils import (
+    Colorspace,
+    FutureArray,
+    SharedMemRGB,
+    SharedMemYUV,
+    create_buffers,
+    create_shared_memory,
+)
 
 # fork clones the parent process directly — no re-import of the main script,
 # so AsyncVideoReader can be instantiated at module level (e.g. in scripts or
@@ -94,19 +100,19 @@ class AsyncVideoReader:
 
         self._worker = mp_ctx.Process(
             target=_reader_process,
-            kwargs=dict(
-                path=self._path,
-                shared_mem_names=shared_mem_names,
-                colorspace=self.colorspace,
-                shape_frame=self._shape_frame,
-                shape_chroma=self._shape_chroma,
-                yuv_packed=yuv_packed,
-                request_queue=self._request_queue,
-                response_queue=self._response_queue,
-                stop_event=self._stop_event,
-                latest_rid=self._latest_rid,
-                buffer_lock=self._buffer_lock,
-            ),
+            kwargs={
+                "path": self._path,
+                "shared_mem_names": shared_mem_names,
+                "colorspace": self.colorspace,
+                "shape_frame": self._shape_frame,
+                "shape_chroma": self._shape_chroma,
+                "yuv_packed": yuv_packed,
+                "request_queue": self._request_queue,
+                "response_queue": self._response_queue,
+                "stop_event": self._stop_event,
+                "latest_rid": self._latest_rid,
+                "buffer_lock": self._buffer_lock,
+            },
             daemon=True,
         )
         self._worker.start()

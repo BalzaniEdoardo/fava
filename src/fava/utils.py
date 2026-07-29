@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from concurrent.futures import Future
+from enum import StrEnum
 from multiprocessing.shared_memory import SharedMemory
 from typing import TypeAlias
 
 import av
 import numpy as np
 from numpy.typing import NDArray
-from enum import StrEnum
 
 UInt8Array: TypeAlias = NDArray[np.uint8]
 TupleYUV: TypeAlias = tuple[UInt8Array, UInt8Array, UInt8Array]

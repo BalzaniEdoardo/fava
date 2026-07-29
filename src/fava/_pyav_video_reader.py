@@ -4,19 +4,18 @@ Base class for audio and video handling.
 Handles opening/closing the stream, seeking, and keyframe extraction.
 """
 from __future__ import annotations
-import abc
-from collections import deque
 
+import abc
 import pathlib
 import threading
 import time
 import warnings
+from collections import deque
 from contextlib import contextmanager
-from typing import List, Literal, Optional, Tuple
+from typing import Literal
 
 import av
 import numpy as np
-
 from numpy.typing import NDArray
 
 # Number of packets to buffer before flushing to the index for codecs without
@@ -249,7 +248,7 @@ class VideoHandler(BaseAudioVideo):
         self,
         video_path: str | pathlib.Path,
         stream_index: int = 0,
-        time: Optional[NDArray] = None,
+        time: NDArray | None = None,
         pixel_format: Literal["rgb24", "yuv420p", "yuv444p"] | None = None,
         buffer_size: int = 30,
     ) -> None:
@@ -281,7 +280,7 @@ class VideoHandler(BaseAudioVideo):
         self.last_loaded_idx = None
 
         # initialize current frame
-        self.current_frame: Optional[av.VideoFrame] = None
+        self.current_frame: av.VideoFrame | None = None
 
         if self.file_path.suffix == ".mkv":
             # mkv time is rounded to 3 digits, at least in the example video
@@ -334,7 +333,7 @@ class VideoHandler(BaseAudioVideo):
 
     def _extract_keyframe_times_and_points(
             self, video_path: str | pathlib.Path, stream_index: int = 0, first_only=False
-    ) -> Tuple[NDArray, NDArray] | None:
+    ) -> tuple[NDArray, NDArray] | None:
         """
         Extract the indices and timestamps of keyframes from a video file.
 
@@ -376,15 +375,13 @@ class VideoHandler(BaseAudioVideo):
             stream = container.streams.video[stream_index]
             stream.codec_context.skip_frame = "NONKEY"
 
-            frame_index = 0
-            for frame in container.decode(stream):
+            for frame_index, frame in enumerate(container.decode(stream)):
                 if not self._running:
                     return
                 keyframe_timestamp.append(frame.time)
                 keyframe_pts.append(frame.pts)
                 if first_only:
                     break
-                frame_index += 1
 
         return np.asarray(keyframe_pts), np.asarray(keyframe_timestamp, dtype=float)
 
@@ -487,7 +484,7 @@ class VideoHandler(BaseAudioVideo):
 
             self._index_ready.set()
 
-    def _get_frame_idx(self, pts: int) -> Tuple[int, bool]:
+    def _get_frame_idx(self, pts: int) -> tuple[int, bool]:
         """
         Get the frame index from the presentation time stamp.
 
@@ -528,7 +525,7 @@ class VideoHandler(BaseAudioVideo):
                 use_time = True
         return idx, use_time
 
-    def _get_target_frame_pts(self, idx: int) -> Tuple[int, bool]:
+    def _get_target_frame_pts(self, idx: int) -> tuple[int, bool]:
         """
         Get the target frame presentation time stamp from frame index.
 
@@ -580,7 +577,7 @@ class VideoHandler(BaseAudioVideo):
                 idx = 0  # safe fallback
 
         # Get the pts of the last loaded index
-        target_pts, use_time = self._get_target_frame_pts(idx)
+        target_pts, _ = self._get_target_frame_pts(idx)
 
         # Seek the next or previous keyframe based on the direction
         with self._lock:
@@ -678,7 +675,7 @@ class VideoHandler(BaseAudioVideo):
             )
 
         # Decode forward from the keyframe until the frame just before (or equal to) target_pts
-        last_idx, preceding_frame = self._decode_and_check_frames(use_time, target_pts, idx)
+        _, preceding_frame = self._decode_and_check_frames(use_time, target_pts, idx)
 
         if preceding_frame is not None:
             self.last_loaded_idx = idx
@@ -718,7 +715,7 @@ class VideoHandler(BaseAudioVideo):
         return last_idx, preceding_frame
 
     @property
-    def shape(self) -> Tuple[int, int, int]:
+    def shape(self) -> tuple[int, int, int]:
         """
         :
             Shape of the video, ``(n_frames, width, height)``.
@@ -734,7 +731,7 @@ class VideoHandler(BaseAudioVideo):
         return self._n_frames, self.stream.width, self.stream.height
 
     @property
-    def _frame_shape(self) -> Tuple[int, ...]:
+    def _frame_shape(self) -> tuple[int, ...]:
         """Per-frame array shape for the chosen pixel format."""
         h, w = self.stream.height, self.stream.width
         if self.pixel_format == "rgb24":
@@ -792,7 +789,7 @@ class VideoHandler(BaseAudioVideo):
         self._wait_for_all_pts(timeout)
         self._wait_for_key_pts(timeout)
 
-    def get_slice(self, start: float, end: float = None):
+    def get_slice(self, start: float, end: float | None = None):
         # TODO check start and end are sorted
         start = self._ts_to_index(start, self.time)
         if end:
@@ -812,7 +809,7 @@ class VideoHandler(BaseAudioVideo):
         idx_start: int,
         idx_end: int,
         step: int = 1,
-    ) -> Tuple[int, List[av.VideoFrame | NDArray], av.VideoFrame]:
+    ) -> tuple[int, list[av.VideoFrame | NDArray], av.VideoFrame]:
         effective_end = min(idx_end, self.shape[0])
         indices = np.arange(idx_start, effective_end, step)
         num_frames = len(indices)
@@ -891,8 +888,8 @@ class VideoHandler(BaseAudioVideo):
 
     def __getitem__(
         self,
-        idx: int | slice | Tuple[int | slice, Tuple[slice, ...]],
-    ) -> NDArray | av.VideoFrame | List[av.VideoFrame]:
+        idx: int | slice | tuple[int | slice, tuple[slice, ...]],
+    ) -> NDArray | av.VideoFrame | list[av.VideoFrame]:
         """
         Get item for video frame.
 
@@ -920,7 +917,7 @@ class VideoHandler(BaseAudioVideo):
             - ``tuple`` → same as above with spatial slices applied.
         """
         # Unpack tuple: first element is time, rest are spatial slices
-        spatial_idx: Tuple[slice, ...] | None = None
+        spatial_idx: tuple[slice, ...] | None = None
         if isinstance(idx, tuple):
             spatial_idx = idx[1:] if len(idx) > 1 else None
             idx = idx[0]
@@ -952,7 +949,7 @@ class VideoHandler(BaseAudioVideo):
             step = abs(step)
 
             if (stop - start) // step > 1:
-                target_pts, use_time = self._get_target_frame_pts(start)
+                target_pts, _ = self._get_target_frame_pts(start)
 
                 if self._stream_pts is None or self._need_seek_call(
                     self._stream_pts, target_pts

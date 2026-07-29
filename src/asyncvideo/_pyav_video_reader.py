@@ -13,6 +13,7 @@ import threading
 import time
 import warnings
 from collections import deque
+from concurrent.futures import Future
 from contextlib import contextmanager
 from typing import Literal
 
@@ -288,19 +289,15 @@ class VideoHandler(BaseAudioVideo):
         self.stream_index = stream_index
         self.pixel_format = pixel_format
 
-        # default to linspace
-        # TODO : what if number of frames is 0.
-        if time is None:
-            self._time_provided = False
-            n_frames = self.stream.frames
-            frame_duration = 1 / float(self.stream.average_rate)
-            self.time = np.linspace(
-                0, frame_duration * n_frames - frame_duration, n_frames
-            )
-        else:
-            # TODO : check that number of time point matches number of frames
-            self._time_provided = True
-            self.time = np.asarray(time)
+        # Frame times are resolved once, by the index thread, and published through
+        # this future. Deriving them needs every frame's PTS, which is only known
+        # when indexing completes -- so rather than hand out a provisional guess
+        # from the nominal frame rate and silently change it later, ``time``
+        # blocks on the future and returns a single, real answer. Callers that
+        # never ask for a timestamp never wait for it.
+        self._time_provided = time is not None
+        self._time_input = None if time is None else np.asarray(time)
+        self._time_future: Future[NDArray] = Future()
 
         # initialize index for last decoded frame
         # if sampling of other signals (LFP) is much denser, multiple times the frame
@@ -503,22 +500,42 @@ class VideoHandler(BaseAudioVideo):
             logger.exception("Index thread error")
         finally:
             self._n_frames = self._i
-            # check if time and frames matches otherwise "correct"
-            if self._time_provided and len(self.time) != self._i:
-                warnings.warn(
-                    f"The provided time array has length {len(self.time)}, but the video has {self._i} frames. "
-                    "Overriding time with `np.linspace(time[0], time[-1], n_frames)`.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                self.time = np.linspace(self.time[0], self.time[-1], self._i)
-            elif not self._time_provided and len(self.time) != self._i:
-                frame_duration = 1 / float(self.stream.average_rate)
-                self.time = np.linspace(
-                    0, frame_duration * self._i - frame_duration, self._i
-                )
-
+            self._resolve_time()
             self._index_ready.set()
+
+    def _resolve_time(self):
+        """Publish the frame times through ``_time_future``.
+
+        Always resolves the future, on every exit path of the index thread: a
+        caller reading ``time`` is blocked on it, so leaving it pending would hang
+        them rather than fail them.
+        """
+        if self._time_future.done():
+            return
+        try:
+            if self._time_provided:
+                if len(self._time_input) != self._i:
+                    raise ValueError(
+                        f"the provided time array has length "
+                        f"{len(self._time_input)}, but the video has {self._i} "
+                        f"frames; pass one timestamp per frame"
+                    )
+                self._time_future.set_result(self._time_input)
+                return
+
+            # Real frame times from the stream's own presentation timestamps.
+            # all_pts is in stream time_base units and sorted into display order
+            # by the indexer, so scaling it gives absolute, monotonic seconds --
+            # accurate for variable frame rate video, unlike a uniform grid.
+            pts = np.asarray(self.all_pts[: self._i], dtype=np.int64)
+            if len(pts) != self._i:
+                raise ValueError(
+                    f"indexing found {self._i} frames but only {len(pts)} "
+                    f"presentation timestamps"
+                )
+            self._time_future.set_result(pts * float(self.stream.time_base))
+        except BaseException as exc:  # noqa: BLE001 - must not leave callers hanging
+            self._time_future.set_exception(exc)
 
     def _get_frame_idx(self, pts: int) -> tuple[int, bool]:
         """
@@ -882,37 +899,32 @@ class VideoHandler(BaseAudioVideo):
             raise ValueError(f"Unsupported pixel_format: {self.pixel_format!r}")
 
     @property
-    def index(self) -> NDArray:
+    def time(self) -> NDArray:
         """
-        Time index in seconds corresponding to frames.
+        :
+            Timestamp of every frame, in seconds, one entry per frame.
 
-        If ``time`` was provided at initialization, that array is returned.
-        Otherwise, a uniformly spaced array derived from the stream rate is used
-        and may be updated as indexing progresses.
-        """
-        if self._time_provided:
-            return self.time
-        else:
-            has_frames = hasattr(self.stream, "frames") and self.stream.frames > 0
-            is_done_unpacking = self._index_ready.is_set()
-            if not has_frames and not is_done_unpacking:
-                warnings.warn(
-                    message="Video ``shape``, which corresponds to the number of frames, is being "
-                    "calculated runtime and will be updated.",
-                    stacklevel=2,
-                )
-            return self.time
+        Notes
+        -----
+        - If a ``time`` array was given at initialization, that array is
+          returned. Otherwise the times are the stream's own presentation
+          timestamps, so they are the real frame times rather than a uniform grid
+          derived from the nominal frame rate -- which matters for variable frame
+          rate video, and for recordings that drop frames.
+        - These are absolute times on the container's clock, so the first frame is
+          not necessarily at ``0``. Subtract ``time[0]`` for times relative to the
+          start of the video.
+        - Reading this blocks until the background indexer has seen every frame,
+          since a frame's timestamp is not known before then. Indexing a video by
+          frame number never waits on it.
 
-    @property
-    def t(self) -> NDArray:
+        Raises
+        ------
+        ValueError
+            If a ``time`` array was given whose length does not match the number
+            of frames actually found in the video.
         """
-        Time index in seconds corresponding to frames.
-
-        If ``time`` was provided at initialization, that array is returned.
-        Otherwise, a uniformly spaced array derived from the stream rate is used
-        and may be updated as indexing progresses.
-        """
-        return self.time
+        return self._time_future.result()
 
     def _wait_for_all_pts(self, timeout=None):
         """Wait until the PTS index thread has finished."""

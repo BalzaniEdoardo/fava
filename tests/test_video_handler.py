@@ -229,7 +229,7 @@ def test_provided_time_wrong_length_raises(video_info):
             # indexing by frame number never consults time, so it still works
             assert video[7] is not None
             with pytest.raises(ValueError, match="one timestamp per frame"):
-                video.time
+                video.time  # noqa: B018 - ruff is dumb, this actually raises
         finally:
             video.close()
 

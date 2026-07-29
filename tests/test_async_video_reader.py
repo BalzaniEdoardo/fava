@@ -196,7 +196,7 @@ def test_time_is_cached_after_first_read(reader):
 
 def test_get_matches_the_synchronous_reader(reader, video_path, reference):
     """get(ts) must resolve to the same frame VideoHandler.get(ts) returns."""
-    packed, height = reference
+    _, height = reference
     for ts in (0.0, 0.5, 1.5, 3.0):
         y, _u, _v = reader.get(ts).result(timeout=RESULT_TIMEOUT)
         with VideoHandler(video_path) as handler:

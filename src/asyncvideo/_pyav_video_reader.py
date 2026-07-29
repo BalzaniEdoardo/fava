@@ -11,7 +11,6 @@ import logging
 import pathlib
 import threading
 import time
-import warnings
 from collections import deque
 from concurrent.futures import Future
 from contextlib import contextmanager

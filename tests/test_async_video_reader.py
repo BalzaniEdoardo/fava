@@ -6,7 +6,6 @@ nothing remained to resolve. So every wait in this module is bounded — a
 regression has to fail the suite, not stall it.
 """
 
-import multiprocessing
 import re
 import threading
 import time
@@ -17,6 +16,7 @@ import pytest
 
 from asyncvideo import AsyncVideoReader, VideoHandler
 from asyncvideo.utils import ReaderError
+from asyncvideo.vr_async import mp_ctx
 
 # Long enough for a cold decode on a slow CI runner, short enough that a genuine
 # hang ends the run instead of hanging it.
@@ -62,8 +62,11 @@ def _segment_names(reader) -> tuple[str, ...]:
 
 DECODE_LAG = 0.4
 
+# Deliberately the reader's own context, not multiprocessing's default: macOS
+# defaults to spawn while asyncvideo explicitly asks for a fork context, so
+# checking the default would skip these tests on a platform where they work.
 requires_fork = pytest.mark.skipif(
-    multiprocessing.get_start_method() != "fork",
+    mp_ctx.get_start_method() != "fork",
     reason=(
         "lag injection patches the parent process and relies on fork to reach the "
         "worker; under spawn the worker re-imports the module and never sees it"

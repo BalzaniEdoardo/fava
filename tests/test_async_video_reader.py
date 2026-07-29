@@ -40,6 +40,80 @@ def _segment_names(reader) -> tuple[str, ...]:
     return tuple(shm.name for shm in reader.shared_mems)
 
 
+# ---------------------------------------------------------------------------
+# End-of-stream handling
+# ---------------------------------------------------------------------------
+
+
+def test_sequential_playthrough_then_wrap(reader, reference):
+    """Looping playback through the worker process.
+
+    This is the failure seen driving the reader from a render loop: playing to
+    the last frame left the worker's decoder at EOF, and the next request failed
+    the future with a RuntimeError instead of returning frame 0.
+    """
+    packed, height = reference
+    n_frames = reader.shape[0]
+
+    for idx in range(n_frames):
+        y, _u, _v = reader[idx].result(timeout=RESULT_TIMEOUT)
+        np.testing.assert_array_equal(y[0], packed[idx][:height])
+
+    # the request that used to raise "reader process failed to decode request N"
+    y, _u, _v = reader[0].result(timeout=RESULT_TIMEOUT)
+    np.testing.assert_array_equal(y[0], packed[0][:height])
+
+
+def test_reads_after_playthrough_recover(reader, reference):
+    """After a full pass, reads in any direction still resolve."""
+    packed, height = reference
+    last = reader.shape[0] - 1
+
+    for idx in range(reader.shape[0]):
+        reader[idx].result(timeout=RESULT_TIMEOUT)
+
+    for idx in (last, 50, last, 0):
+        y, _u, _v = reader[idx].result(timeout=RESULT_TIMEOUT)
+        np.testing.assert_array_equal(y[0], packed[idx][:height])
+
+
+# ---------------------------------------------------------------------------
+# Index handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "index",
+    [10, (10,), np.int64(10), np.int32(10), slice(10, 11)],
+    ids=["int", "tuple", "np_int64", "np_int32", "slice"],
+)
+def test_index_forms_are_equivalent(reader, reference, index):
+    """reader[i], reader[(i,)], numpy ints and slices all select frame 10."""
+    packed, height = reference
+    y, _u, _v = reader[index].result(timeout=RESULT_TIMEOUT)
+    np.testing.assert_array_equal(y[0], packed[10][:height])
+
+
+def test_empty_tuple_index_raises(reader):
+    """An unusable index must raise at the call site, not fail a future."""
+    with pytest.raises(IndexError, match="empty tuple"):
+        reader[()]
+
+
+def test_bad_index_does_not_disturb_pending_state(reader, reference):
+    """A rejected index must leave the reader usable.
+
+    The index is unpacked before ``__getitem__`` cancels the previous request or
+    bumps the request id, so a bad index cannot strand the reader half-updated.
+    """
+    packed, height = reference
+    with pytest.raises(IndexError):
+        reader[()]
+
+    y, _u, _v = reader[10].result(timeout=RESULT_TIMEOUT)
+    np.testing.assert_array_equal(y[0], packed[10][:height])
+
+
 def _assert_segment_removed(name: str) -> None:
     """Fail unless the named segment is gone from the system.
 

@@ -136,6 +136,98 @@ def test_pts_ordering(video_info):
 
 
 # ---------------------------------------------------------------------------
+# End-of-stream handling
+#
+# Reading straight through to the last frame exhausts the decoder. On B-frame
+# codecs (H.264/H.265) packets arrive in decode order, so reaching a frame near
+# the end means consuming the whole stream; the decoder is then flushed and
+# raises EOFError on the next packet unless it is re-seeked first. These tests
+# cover plain forward playback, which the rest of the suite never does -- it
+# reads scattered indices and slices, and so missed this entirely.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_sequential_playthrough(video_info):
+    """Every frame, in order, must decode and match an independent decode."""
+    frame_array, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        for idx in range(video.shape[0]):
+            frame = video[idx]
+            np.testing.assert_array_equal(
+                frame.to_ndarray(),
+                frame_array[idx],
+                err_msg=f"frame {idx} differs from the reference decode",
+            )
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_playthrough_then_wraps_to_start(video_info):
+    """Looping playback: a full pass must not poison the next read."""
+    frame_array, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        for idx in range(video.shape[0]):
+            video[idx]
+        # the request that used to raise EOFError
+        np.testing.assert_array_equal(video[0].to_ndarray(), frame_array[0])
+        np.testing.assert_array_equal(video[1].to_ndarray(), frame_array[1])
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_reads_after_eof_recover(video_info):
+    """Once the stream has hit EOF, reads in any direction must still work."""
+    frame_array, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        last = video.shape[0] - 1
+
+        # drive the decoder through the whole stream
+        for idx in range(video.shape[0]):
+            video[idx]
+
+        for idx in (last, 50, last, 0, last):
+            np.testing.assert_array_equal(
+                video[idx].to_ndarray(),
+                frame_array[idx],
+                err_msg=f"frame {idx} wrong after EOF recovery",
+            )
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_seek_clears_eof_flag(video_info):
+    """A seek flushes the decoder, so it must also clear the EOF flag.
+
+    Set the flag directly rather than by playing to the end: whether a given
+    read exhausts the stream depends on the codec's packet ordering, but the
+    invariant being checked here -- seeking makes the decoder usable again --
+    does not.
+    """
+    frame_array, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        target_pts, _use_time = video._get_target_frame_pts(0)
+
+        video._at_eof = True
+        video._seek(target_pts)
+        assert not video._at_eof
+
+        # and the reader is genuinely usable afterwards
+        np.testing.assert_array_equal(video[0].to_ndarray(), frame_array[0])
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_stale_eof_flag_is_recovered(video_info):
+    """A read must succeed even if the decoder is marked EOF when it starts.
+
+    Guards the recovery path in isolation: with the flag set, ``get`` is
+    obliged to re-seek before decoding rather than trusting the stream position.
+    """
+    frame_array, _, _, video_path = video_info
+    with VideoHandler(video_path, time=np.arange(100)) as video:
+        video[10]
+        video._at_eof = True
+        np.testing.assert_array_equal(video[11].to_ndarray(), frame_array[11])
+
+
+# ---------------------------------------------------------------------------
 # Buffer integration tests
 # ---------------------------------------------------------------------------
 

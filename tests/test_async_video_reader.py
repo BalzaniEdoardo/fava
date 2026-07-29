@@ -14,7 +14,7 @@ from multiprocessing.shared_memory import SharedMemory
 import numpy as np
 import pytest
 
-from asyncvideo import AsyncVideoReader
+from asyncvideo import AsyncVideoReader, VideoHandler
 from asyncvideo.utils import ReaderError
 
 # Long enough for a cold decode on a slow CI runner, short enough that a genuine
@@ -38,6 +38,242 @@ def reader(video_path):
 
 def _segment_names(reader) -> tuple[str, ...]:
     return tuple(shm.name for shm in reader.shared_mems)
+
+
+# ---------------------------------------------------------------------------
+# Lag injection
+#
+# Without it, a request usually completes before the next one is submitted, so
+# the window in which superseding happens is never open and any assertion about
+# cancellation passes trivially.
+#
+# The worker is forked, so patching VideoHandler *before* the reader is
+# constructed means the child inherits the slowed method. Nothing in ``src`` is
+# touched, and the parent is unaffected because only the worker decodes.
+# ---------------------------------------------------------------------------
+
+DECODE_LAG = 0.4
+
+
+@pytest.fixture()
+def slow_reader_factory(video_path, monkeypatch):
+    """Build readers whose worker takes ``DECODE_LAG`` seconds per decode."""
+    import asyncvideo._pyav_video_reader as vr_mod
+
+    real_get = vr_mod.VideoHandler.get
+    real_getitem = vr_mod.VideoHandler.__getitem__
+
+    def slow_get(self, ts):
+        time.sleep(DECODE_LAG)
+        return real_get(self, ts)
+
+    def slow_getitem(self, idx):
+        time.sleep(DECODE_LAG)
+        return real_getitem(self, idx)
+
+    created = []
+
+    def make(**kwargs):
+        # patched only for the duration of the fork, so __init__'s own frame-0
+        # decode in the parent is slowed too -- harmless, and it keeps the child
+        # consistent with what the parent measured
+        monkeypatch.setattr(vr_mod.VideoHandler, "get", slow_get)
+        monkeypatch.setattr(vr_mod.VideoHandler, "__getitem__", slow_getitem)
+        r = AsyncVideoReader(video_path, **kwargs)
+        created.append(r)
+        return r
+
+    try:
+        yield make
+    finally:
+        for r in created:
+            r.shutdown()
+
+
+def test_lag_injection_actually_slows_the_worker(slow_reader_factory):
+    """Guard the guard: if the patch stopped reaching the child, the tests below
+    would silently go back to proving nothing."""
+    reader = slow_reader_factory()
+    started = time.monotonic()
+    reader[10].result(timeout=RESULT_TIMEOUT)
+    assert time.monotonic() - started >= DECODE_LAG
+
+
+def test_get_supersedes_an_in_flight_index_request(slow_reader_factory, reference):
+    """A time request must cancel an index request that is still decoding."""
+    packed, height = reference
+    reader = slow_reader_factory()
+    times = reader.time
+
+    stale = reader[0]
+    assert not stale.done(), "decode should still be in flight"
+    fresh = reader.get(times[42])
+
+    y, _u, _v = fresh.result(timeout=RESULT_TIMEOUT)
+    np.testing.assert_array_equal(y[0], packed[42][:height])
+    assert stale.cancelled(), "the superseded request must be cancelled, not served"
+
+
+def test_index_supersedes_an_in_flight_get_request(slow_reader_factory, reference):
+    """And the reverse: they share one submit path, so either can supersede."""
+    packed, height = reference
+    reader = slow_reader_factory()
+    times = reader.time
+
+    stale = reader.get(times[0])
+    assert not stale.done()
+    fresh = reader[42]
+
+    y, _u, _v = fresh.result(timeout=RESULT_TIMEOUT)
+    np.testing.assert_array_equal(y[0], packed[42][:height])
+    assert stale.cancelled()
+
+
+def test_only_the_newest_of_many_requests_is_served(slow_reader_factory, reference):
+    """Rapid requests, as from dragging a slider: only the last one resolves.
+
+    Also covers the enqueue ordering: ``_submit`` bumps the request id under a
+    lock but drains and enqueues outside it, so requests can reach the worker out
+    of order. The worker's ``rid < latest_rid`` check is what must discard the
+    older ones.
+    """
+    packed, height = reference
+    reader = slow_reader_factory()
+    times = reader.time
+
+    futures = []
+    for idx in (0, 10, 20, 30):
+        futures.append(reader[idx])
+    # interleave a time request, so the final winner arrives through get()
+    futures.append(reader.get(times[42]))
+
+    y, _u, _v = futures[-1].result(timeout=RESULT_TIMEOUT)
+    np.testing.assert_array_equal(y[0], packed[42][:height])
+    assert all(f.cancelled() for f in futures[:-1]), (
+        "every superseded request must be cancelled"
+    )
+
+
+def test_superseded_request_does_not_corrupt_the_result(slow_reader_factory, reference):
+    """The winning frame must be intact, not a mix of two decodes.
+
+    The worker writes into one shared buffer, so a superseded decode writing
+    while the listener copies out would show up as a frame that matches neither
+    request.
+    """
+    packed, height = reference
+    reader = slow_reader_factory()
+
+    for _ in range(5):
+        reader[0]
+        y, _u, _v = reader[42].result(timeout=RESULT_TIMEOUT)
+        np.testing.assert_array_equal(y[0], packed[42][:height])
+
+
+# ---------------------------------------------------------------------------
+# Frame times and time-based access
+#
+# The worker's handler owns the timestamps. ``get`` resolves a time there, so it
+# needs no array on this side; ``time`` is published once by the worker and
+# cached here.
+# ---------------------------------------------------------------------------
+
+
+def test_time_matches_the_synchronous_reader(reader, video_path):
+    """Parent and worker must agree on what the frame times are."""
+    with VideoHandler(video_path) as handler:
+        expected = handler.time
+
+    np.testing.assert_array_equal(reader.time, expected)
+    assert len(reader.time) == reader.shape[0]
+
+
+def test_time_is_cached_after_first_read(reader):
+    """It arrives once over a queue, so it must be kept rather than re-fetched."""
+    first = reader.time
+    assert reader.time is first
+
+
+def test_get_matches_the_synchronous_reader(reader, video_path, reference):
+    """get(ts) must resolve to the same frame VideoHandler.get(ts) returns."""
+    _, height = reference
+    for ts in (0.0, 0.5, 1.5, 3.0):
+        y, _u, _v = reader.get(ts).result(timeout=RESULT_TIMEOUT)
+        with VideoHandler(video_path) as handler:
+            expected = handler.get(ts).to_ndarray()
+        np.testing.assert_array_equal(y[0], expected[:height])
+
+
+def test_get_and_index_agree(reader, reference):
+    """Addressing a frame by time or by number must give the same pixels."""
+    packed, height = reference
+    times = reader.time
+    for idx in (0, 7, 42, 99):
+        by_index = reader[idx].result(timeout=RESULT_TIMEOUT)[0]
+        by_time = reader.get(times[idx]).result(timeout=RESULT_TIMEOUT)[0]
+        np.testing.assert_array_equal(by_time, by_index)
+        np.testing.assert_array_equal(by_index[0], packed[idx][:height])
+
+
+def test_get_after_index_request_returns_the_newer_frame(reader, reference):
+    """Back-to-back index then time request: the later one wins.
+
+    Deliberately makes no claim about cancellation -- without induced lag the
+    first request usually finishes before the second is submitted, so there is no
+    supersede window to observe. See the lag-injection tests above for that.
+    """
+    packed, height = reference
+    reader[0]
+    y, _u, _v = reader.get(reader.time[42]).result(timeout=RESULT_TIMEOUT)
+    np.testing.assert_array_equal(y[0], packed[42][:height])
+
+
+def test_provided_time_is_used_for_get(video_path, reference):
+    """A supplied clock must reach the worker, not be silently dropped."""
+    packed, height = reference
+    offset = 100.0
+    times = np.arange(100) / 30.0 + offset
+
+    r = AsyncVideoReader(video_path, time=times)
+    try:
+        np.testing.assert_allclose(r.time, times)
+        # 100.5 s on this clock is frame 15
+        y, _u, _v = r.get(offset + 0.5).result(timeout=RESULT_TIMEOUT)
+        np.testing.assert_array_equal(y[0], packed[15][:height])
+    finally:
+        r.shutdown()
+
+
+def test_provided_time_wrong_length_raises(video_path):
+    """Rejected at construction here: the container declares its frame count."""
+    with pytest.raises(ValueError, match="one timestamp per frame"):
+        AsyncVideoReader(video_path, time=np.arange(90))
+
+
+def test_shutdown_without_reading_time_does_not_hang(video_path):
+    """The worker publishes the times whether or not anyone collects them.
+
+    A multiprocessing queue holding an unread array keeps its feeder thread
+    alive and can block the child at exit, which is why the worker calls
+    ``cancel_join_thread``.
+
+    Note this is a smoke test, not a regression test for that call: the fixture
+    has 100 frames, so the unread array is under a kilobyte and fits in the pipe
+    buffer, and the shutdown stays clean even without ``cancel_join_thread``.
+    Reproducing the hang needs an array too large for the buffer -- megabytes,
+    i.e. a video with hundreds of thousands of frames.
+    """
+    started = time.monotonic()
+    r = AsyncVideoReader(video_path)
+    r[10].result(timeout=RESULT_TIMEOUT)
+    r.shutdown()  # never touched r.time
+    assert time.monotonic() - started < RELEASE_TIMEOUT
+
+
+def test_pixel_format_is_not_accepted(video_path):
+    """Frames cross in the native format, so the decode format is not a choice."""
+    with pytest.raises(TypeError):
+        AsyncVideoReader(video_path, pixel_format="rgb24")
 
 
 # ---------------------------------------------------------------------------

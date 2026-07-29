@@ -37,6 +37,9 @@ def video_gen(session):
             ("libx265", "mp4"),
         ]
     ]
+    # unevenly spaced frames, so tests can tell real timestamps apart from a
+    # uniform grid derived from the nominal frame rate
+    generated_video.append("variable_rate_video_libx264.mp4")
     is_in_dir = all((video_dir / name).exists() for name in generated_video)
     session.log(f"videos found: {is_in_dir}")
     if not is_in_dir:

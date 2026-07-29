@@ -123,6 +123,136 @@ def test_video_shape_matches_returned_array(video_info, pixel_format):
         assert video.shape == (len(video), *frame.shape)
 
 
+# ---------------------------------------------------------------------------
+# Frame times
+#
+# ``time`` is resolved once, by the index thread, and published through a
+# future: a frame's timestamp is not knowable until every PTS has been seen, so
+# reading it blocks rather than returning a provisional guess.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def variable_rate_video():
+    """A video whose frames are unevenly spaced in time.
+
+    Generated with explicit per-frame timestamps alternating 20 ms and 60 ms
+    gaps, so no single frame rate reproduces them.
+    """
+    path = (
+        pathlib.Path(__file__).parent / "test_video" / "variable_rate_video_libx264.mp4"
+    )
+    if not path.exists():
+        pytest.skip(f"{path} missing — run 'nox -s video_gen' to generate test videos")
+    return path
+
+
+def test_time_is_not_a_uniform_grid(variable_rate_video):
+    """On a variable rate video, time must follow the real frame spacing.
+
+    This is the test the constant-rate fixtures cannot provide: there, PTS and a
+    uniform grid coincide exactly, so a reader inventing timestamps from the
+    nominal rate would pass. Here the nominal rate implies one gap and the actual
+    frames have two, so only real timestamps match.
+    """
+    from generate_numbered_video import variable_frame_intervals
+
+    with VideoHandler(variable_rate_video) as video:
+        times = video.time
+
+        gaps = np.round(np.diff(times), 6)
+        assert set(gaps.tolist()) == {0.02, 0.06}, "frame spacing must not be uniform"
+        np.testing.assert_allclose(
+            times, variable_frame_intervals(len(times)), atol=1e-6
+        )
+
+        # and the uniform grid the nominal rate would give does *not* match,
+        # which is what makes the assertion above meaningful
+        uniform = np.linspace(times[0], times[-1], len(times))
+        assert not np.allclose(times, uniform, atol=1e-3)
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_time_matches_presentation_timestamps(video_info):
+    """Without a provided array, time is the stream's own PTS, in seconds.
+
+    The oracle is an independent decode: the fixture's ``frame_pts`` come from
+    PyAV directly, and the time base is read from a separate container, so
+    nothing here is derived from the object under test.
+
+    Note this cannot distinguish PTS-derived times from a uniform grid on these
+    fixtures -- they are constant rate and start at 0, so both agree exactly. It
+    does pin the scaling, the ordering and the length.
+    """
+    _, frame_pts, _, video_path = video_info
+    with av.open(str(video_path)) as container:
+        time_base = float(container.streams.video[0].time_base)
+    expected = np.asarray(frame_pts, dtype=np.int64) * time_base
+
+    with VideoHandler(video_path) as video:
+        np.testing.assert_array_equal(video.time, expected)
+        assert len(video.time) == video.shape[0]
+        assert np.all(np.diff(video.time) > 0), "frame times must increase"
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_provided_time_is_returned_unchanged(video_info):
+    """A correctly sized time array is handed back as given, not resampled."""
+    _, _, _, video_path = video_info
+    # deliberately uneven, so any resampling to a uniform grid would show up
+    provided = np.cumsum(np.linspace(0.01, 0.05, 100)) + 410.0
+    with VideoHandler(video_path, time=provided) as video:
+        np.testing.assert_array_equal(video.time, provided)
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_provided_time_wrong_length_raises(video_info):
+    """A mismatched time array must be rejected, eagerly where possible.
+
+    Containers that declare a frame count are checked at construction, so the
+    error lands on the line that passed the array. Containers that declare
+    nothing (vp9/webm reports 0) can only be checked once the indexer has
+    counted the frames, so there the error surfaces on first use.
+    """
+    _, _, _, video_path = video_info
+    with av.open(str(video_path)) as container:
+        declared = container.streams.video[0].frames
+
+    wrong = np.arange(90)  # every fixture video has 100 frames
+
+    if declared > 0:
+        with pytest.raises(ValueError, match="one timestamp per frame"):
+            VideoHandler(video_path, time=wrong)
+    else:
+        video = VideoHandler(video_path, time=wrong)
+        try:
+            # indexing by frame number never consults time, so it still works
+            assert video[7] is not None
+            with pytest.raises(ValueError, match="one timestamp per frame"):
+                video.time  # noqa: B018 - ruff is dumb, this actually raises
+        finally:
+            video.close()
+
+
+@pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
+def test_indexing_by_frame_never_waits_on_time(video_info):
+    """Frame-number access must not touch ``time``.
+
+    ``__init__`` decodes frame 0 while its own index thread is still running, so
+    if the decode path consulted ``time`` it would wait on a future that only
+    that thread can resolve -- a deadlock. Substituting a future that never
+    resolves proves the decode path is independent of it.
+    """
+    _, _, _, video_path = video_info
+    with VideoHandler(video_path) as video:
+        from concurrent.futures import Future
+
+        video._time_future = Future()  # never resolved
+        assert video[7] is not None
+        assert video[0:3] is not None
+        assert video.shape[0] == 100
+
+
 @pytest.mark.parametrize("video_info", CODEC_EXTENSION_COMBOS, indirect=True)
 def test_pts_ordering(video_info):
     # pts from full decoding

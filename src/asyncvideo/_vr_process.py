@@ -1,5 +1,6 @@
 import logging
 import queue
+import threading
 from multiprocessing import Event, Lock, Queue
 from multiprocessing.shared_memory import SharedMemory
 from multiprocessing.sharedctypes import Synchronized
@@ -32,13 +33,37 @@ def _reader_process(
     shape_frame: tuple[int, int],
     shape_chroma: tuple[int, int] | None,
     yuv_packed: bool,
+    handler_kwargs: dict,
+    time_queue: Queue,
     request_queue: Queue,
     response_queue: Queue,
     stop_event: Event,
     latest_rid: Synchronized,
     buffer_lock: Lock,
 ):
-    vr = VideoHandler(path, pixel_format=None)
+    # handler_kwargs carries the caller's stream_index / time / buffer_size, so
+    # this handler resolves timestamps against the same clock as the parent's
+    vr = VideoHandler(path, pixel_format=None, **handler_kwargs)
+
+    # Publish the frame times once, from a helper thread: reading ``vr.time``
+    # blocks until indexing completes, and doing that on the request loop would
+    # stall frame decoding for as long as the index takes.
+    #
+    # cancel_join_thread matters here: the parent may never read this queue, and
+    # without it a buffered array keeps the queue's feeder thread alive and hangs
+    # this process on exit.
+    time_queue.cancel_join_thread()
+
+    def _publish_times():
+        try:
+            time_queue.put(("time", np.asarray(vr.time)))
+        except BaseException as exc:  # noqa: BLE001 - forwarded to the parent
+            try:
+                time_queue.put(("error", exc))
+            except Exception:
+                logger.exception("[_reader_process] failed to report time error")
+
+    threading.Thread(target=_publish_times, daemon=True).start()
 
     shared_mems: SharedMemRGB | SharedMemYUV = tuple(
         SharedMemory(name=n) for n in shared_mem_names
@@ -63,7 +88,7 @@ def _reader_process(
             if request is None:
                 break
 
-            rid, index = request
+            rid, selector, by_time = request
 
             # skip if a newer request has already been submitted - precise
             # per-rid check, unlike a single shared cancel bit which can't
@@ -72,7 +97,9 @@ def _reader_process(
                 continue
 
             try:
-                decoded = vr[index]
+                # ``get`` treats its argument as a timestamp, ``__getitem__`` as a
+                # frame index; both return frames in the stream's native format.
+                decoded = vr.get(selector) if by_time else vr[selector]
                 # VideoHandler returns a list of frames for a slice but a bare
                 # frame for an int index; normalize to a single frame.
                 frame: av.VideoFrame = (

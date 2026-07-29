@@ -9,6 +9,7 @@ from multiprocessing import Queue
 from pathlib import Path
 
 import numpy as np
+from numpy.typing import NDArray
 
 from ._pyav_video_reader import VideoHandler
 from ._vr_process import _reader_process
@@ -33,20 +34,93 @@ else:
 
 
 class AsyncVideoReader:
+    """
+    Video reader that decodes in a separate process.
+
+    Requesting a frame returns a `concurrent.futures.Future` immediately, and the
+    decode happens in a worker process, so the calling thread is never blocked by
+    it. Each reader owns one process, so several readers decode genuinely in
+    parallel — which is the point when displaying more than one video at a time.
+
+    Frames come back in the video's native pixel format, one per request. Use
+    `to_rgb` to convert them for display.
+
+    A new request supersedes any older one still in flight: the earlier future is
+    cancelled rather than queued. Indexing on every change of a slider therefore
+    stays responsive instead of working through frames that are no longer wanted.
+
+    Parameters
+    ----------
+    path :
+        Path to the video file.
+    time :
+        Timestamps for each frame, in seconds. Pass this when frame times come
+        from an acquisition system rather than a constant frame rate; `get` and
+        `t` then use this clock. If ``None``, a uniform grid is derived from the
+        stream's average rate.
+    yuv_packed :
+        For a ``yuv420p`` video, transfer the frame as a single packed
+        ``(1, H * 3 // 2, W)`` array rather than as a ``(Y, U, V)`` tuple of
+        planes. Ignored for ``rgb24`` video.
+    stream_index :
+        Index of the video stream to read, for files carrying more than one.
+    buffer_size :
+        Number of recently decoded frames the worker keeps cached. A request that
+        hits the cache needs no seeking or decoding. Default is 30.
+
+    Notes
+    -----
+    - The reader owns a process, so call `shutdown` when finished with it.
+    - There is no ``pixel_format`` parameter, unlike `VideoHandler`: frames are
+      always decoded in the video's native format. Use `to_rgb` to convert them.
+
+    Examples
+    --------
+    >>> from asyncvideo import AsyncVideoReader
+    >>> reader = AsyncVideoReader("example.mp4")  # doctest: +SKIP
+    >>> future = reader[4200]  # returns at once  # doctest: +SKIP
+    >>> frame = reader.to_rgb(future.result())[0]  # doctest: +SKIP
+    >>> reader.shutdown()  # doctest: +SKIP
+
+    See Also
+    --------
+    VideoHandler
+        Synchronous reader. Decodes in the calling thread, and can return a range
+        of frames from one request.
+    """
+
     def __array__(self) -> AsyncVideoReader:
         return self
 
     def __init__(
         self,
         path: str | Path,
+        time: NDArray | None = None,
         yuv_packed: bool = False,
-        **kwargs,
-    ):
+        stream_index: int = 0,
+        buffer_size: int = 30,
+    ) -> None:
         self._path = Path(path)
-        self._kwargs = kwargs
 
-        vr = VideoHandler(self._path, pixel_format=None)
+        # pixel_format is deliberately fixed: frames cross the process boundary in
+        # the stream's native layout, since the shared-memory segments are sized
+        # from it. Everything else is forwarded to the worker's handler so that
+        # time lookups there use the same clock as on this side.
+        self._handler_kwargs = {
+            "stream_index": stream_index,
+            "time": time,
+            "buffer_size": buffer_size,
+        }
+
+        vr = VideoHandler(self._path, pixel_format=None, **self._handler_kwargs)
         frame0 = vr[(slice(0, 1),)][0]
+
+        # Frame times are published once by the worker, whose handler owns them,
+        # and cached here on first read. Deliberately not taken from ``vr`` above:
+        # its times are only known after a full index pass, and waiting for that
+        # would slow construction for every caller, including those who only ever
+        # index by frame number.
+        self._time: NDArray | None = None
 
         # take the pixel grid from the frame itself: VideoHandler.shape reports the
         # native to_ndarray() layout here, which for yuv420p is (h * 3 // 2, w)
@@ -84,6 +158,10 @@ class AsyncVideoReader:
 
         self._request_queue: Queue = mp_ctx.Queue()
         self._response_queue: Queue = mp_ctx.Queue()
+        # carries exactly one message: the frame times, or the error raised while
+        # resolving them. Kept off the request queue, which is drained of stale
+        # entries on every new request and would discard it.
+        self._time_queue: Queue = mp_ctx.Queue()
 
         self._stop_event = mp_ctx.Event()
         self._buffer_lock = mp_ctx.Lock()
@@ -120,6 +198,8 @@ class AsyncVideoReader:
                 "shape_frame": self._shape_frame,
                 "shape_chroma": self._shape_chroma,
                 "yuv_packed": yuv_packed,
+                "handler_kwargs": self._handler_kwargs,
+                "time_queue": self._time_queue,
                 "request_queue": self._request_queue,
                 "response_queue": self._response_queue,
                 "stop_event": self._stop_event,
@@ -170,6 +250,34 @@ class AsyncVideoReader:
         >>> rgb = reader.to_rgb(reader[(10,)].result())  # doctest: +SKIP
         """
         return to_rgb(frames, from_format=str(self.colorspace))
+
+    @property
+    def time(self) -> NDArray:
+        """
+        :
+            Timestamp of every frame, in seconds, one entry per frame.
+
+        Notes
+        -----
+        - The ``time`` array given at construction, or the stream's own
+          presentation timestamps. See `VideoHandler.time`.
+        - Reading this the first time blocks until the worker has indexed every
+          frame, since the timestamps are not known before then. `get` does not
+          wait on it: the timestamp is resolved in the worker, which owns the
+          times already.
+
+        Raises
+        ------
+        ValueError
+            If a ``time`` array was given whose length does not match the number
+            of frames actually found in the video.
+        """
+        if self._time is None:
+            kind, payload = self._time_queue.get()
+            if kind == "error":
+                raise payload
+            self._time = payload
+        return self._time
 
     @property
     def dtype(self) -> np.dtype:
@@ -255,8 +363,56 @@ class AsyncVideoReader:
         return index
 
     def __getitem__(self, index) -> FutureArray:
-        frame_index = self._frame_index(index)
+        """
+        Request the frame at a given index, without waiting for it.
 
+        Parameters
+        ----------
+        index :
+            Frame index. Accepts ``reader[i]``, ``reader[i:j]`` and the tuple form
+            ``reader[(i,)]``, whose first entry selects the frame. Since one frame
+            is transferred per request, a slice still resolves to a single frame.
+
+        Returns
+        -------
+        :
+            A future resolving to the frame in the video's native format: a
+            ``(Y, U, V)`` tuple of planes for ``yuv420p``, or a single array for
+            ``rgb24`` and for ``yuv_packed=True``. Each carries a leading axis of
+            length 1. Cancels any request still in flight.
+        """
+        return self._submit(self._frame_index(index), by_time=False)
+
+    def get(self, ts: float) -> FutureArray:
+        """
+        Request the frame at a timestamp, without waiting for it.
+
+        The timestamp is resolved against `t`, so this is the counterpart of
+        `VideoHandler.get` and is the reliable way to address a moment rather than
+        a position: cameras recorded together often run at different frame rates,
+        so the same instant is a different frame index in each video.
+
+        Parameters
+        ----------
+        ts :
+            Time in seconds, on the same clock as `t`.
+
+        Returns
+        -------
+        :
+            A future resolving to the frame at, or immediately before, ``ts``, in
+            the same form `__getitem__` returns. Cancels any request still in
+            flight.
+
+        Examples
+        --------
+        >>> reader = AsyncVideoReader("example.mp4")  # doctest: +SKIP
+        >>> frame = reader.to_rgb(reader.get(12.5).result())[0]  # doctest: +SKIP
+        """
+        return self._submit(float(ts), by_time=True)
+
+    def _submit(self, selector, by_time: bool) -> FutureArray:
+        """Queue one request, superseding whatever is still in flight."""
         with self._listener_lock:
             if self._pending_future is not None and not self._pending_future.done():
                 self._pending_future.cancel()
@@ -278,7 +434,7 @@ class AsyncVideoReader:
             except _stdlib_queue.Empty:
                 break
 
-        self._request_queue.put((self._pending_rid, frame_index))
+        self._request_queue.put((self._pending_rid, selector, by_time))
         return future
 
     def shutdown(self, wait: bool = True):

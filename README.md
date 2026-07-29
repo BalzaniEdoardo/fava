@@ -13,32 +13,40 @@ Video files are compressed, and that compression has two practical consequences:
 
 ```python
 from asyncvideo import VideoHandler
+from asyncvideo.fetch import fetch_times, fetch_video
 
-with VideoHandler("example.mp4", pixel_format="rgb24") as video:
-    print(video.shape)               # (5000, 480, 640, 3) — frames, height, width, RGB
+with VideoHandler(fetch_video("left"), pixel_format="rgb24") as video:
+    print(video.shape)               # (601, 1024, 1280, 3) — frames, height, width, RGB
 
-    frame = video[4200]              # one frame, by number
-    clip = video[1000:2000:10]       # a strided range
+    frame = video[420]               # one frame, by number
+    clip = video[100:200:10]         # a strided range
     crop = video[0:100, 0:64, 0:64]  # frames, plus a spatial crop
 
-    # or by time in seconds, using each frame's timestamp
-    at_time = video.get(12.5)
-    window = video.get_slice(12.5, 13.0)   # a time range -> a slice
+# or by time in seconds, using the timestamps the acquisition system recorded
+with VideoHandler(
+    fetch_video("left"), time=fetch_times("left"), pixel_format="rgb24"
+) as video:
+    at_time = video.get(124.5)
+    window = video.get_slice(124.5, 125.0)   # a time range -> a slice
     half_second = video[window]
 ```
+
+Every snippet here runs as written. `fetch_video` and `fetch_times` download a short clip
+of a real multi-camera recording on first use — see [Example data](#example-data). Reading
+your own files needs nothing extra.
 
 **`AsyncVideoReader`** streams several videos in parallel. It runs one decoder process per open video and returns a `Future` instead of blocking, so the streams decode concurrently. Frames are indexed the same way, one at a time:
 
 ```python
 from asyncvideo import AsyncVideoReader
+from asyncvideo.fetch import fetch_video
 
-# Assume multi-camera recordings
-paths = ["cam0.mp4", "cam1.mp4", "cam2.mp4"]
-readers = [AsyncVideoReader(p) for p in paths]
+# three cameras filming the same session
+readers = [AsyncVideoReader(fetch_video(cam)) for cam in ("left", "body", "right")]
 
-# every video starts decoding at once; 
+# every video starts decoding at once;
 # the futures are returned immediately, before the frames are available
-futures = [r[4200] for r in readers]
+futures = [r[100] for r in readers]
 
 # result() waits for the frame
 frames = [f.result() for f in futures]
@@ -81,19 +89,24 @@ Each reader owns a process, so remember to call `shutdown()` when you are done w
 Frame times rarely start at zero or fall on an exact grid, so pass `time=` — one timestamp per frame, from the acquisition system — and every lookup uses your clock rather than a frame rate guessed from the container:
 
 ```python
-import numpy as np
-from asyncvideo import VideoHandler
+ from asyncvideo import VideoHandler
+from asyncvideo.fetch import fetch_times, fetch_video
 
-frame_times = np.load("frame_times.npy")     # one timestamp per frame, in seconds
-grooming_start, grooming_end = 412.5, 415.0  # a scored behavioural epoch
+bout_start, bout_end = 124.0, 125.0   # a scored behavioural epoch, in session time
 
-with VideoHandler("session.mp4", time=frame_times, pixel_format="rgb24") as video:
-    window = video.get_slice(grooming_start, grooming_end)
-    bout = video[window]                     # (n_frames, height, width, 3)
+with VideoHandler(
+    fetch_video("left"), time=fetch_times("left"), pixel_format="rgb24"
+) as video:
+    window = video.get_slice(bout_start, bout_end)
+    bout = video[window]                 # (n_frames, height, width, 3)
 
-    print(bout.shape)
-    print(video.time[window])                # the timestamp of each frame returned
+    print(bout.shape)                    # (60, 1024, 1280, 3)
+    print(video.time[window])            # the timestamp of each frame returned
 ```
+
+Note the timestamps do not start at zero: this clip was cut from two minutes into the
+session, and its `time` array says so. That is what acquisition timestamps look like, and
+passing them as `time=` is what lets you ask for 124.0 s directly.
 
 Video and other recorded signals — spike times, a behavioural trace — can then be indexed by the same number, without converting between clocks at every call.
 

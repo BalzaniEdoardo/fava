@@ -14,7 +14,7 @@ from multiprocessing.shared_memory import SharedMemory
 import numpy as np
 import pytest
 
-from asyncvideo import AsyncVideoReader
+from asyncvideo import AsyncVideoReader, VideoHandler
 from asyncvideo.utils import ReaderError
 
 # Long enough for a cold decode on a slow CI runner, short enough that a genuine
@@ -38,6 +38,110 @@ def reader(video_path):
 
 def _segment_names(reader) -> tuple[str, ...]:
     return tuple(shm.name for shm in reader.shared_mems)
+
+
+# ---------------------------------------------------------------------------
+# Frame times and time-based access
+#
+# The worker's handler owns the timestamps. ``get`` resolves a time there, so it
+# needs no array on this side; ``time`` is published once by the worker and
+# cached here.
+# ---------------------------------------------------------------------------
+
+
+def test_time_matches_the_synchronous_reader(reader, video_path):
+    """Parent and worker must agree on what the frame times are."""
+    with VideoHandler(video_path) as handler:
+        expected = handler.time
+
+    np.testing.assert_array_equal(reader.time, expected)
+    assert len(reader.time) == reader.shape[0]
+
+
+def test_time_is_cached_after_first_read(reader):
+    """It arrives once over a queue, so it must be kept rather than re-fetched."""
+    first = reader.time
+    assert reader.time is first
+
+
+def test_get_matches_the_synchronous_reader(reader, video_path, reference):
+    """get(ts) must resolve to the same frame VideoHandler.get(ts) returns."""
+    packed, height = reference
+    for ts in (0.0, 0.5, 1.5, 3.0):
+        y, _u, _v = reader.get(ts).result(timeout=RESULT_TIMEOUT)
+        with VideoHandler(video_path) as handler:
+            expected = handler.get(ts).to_ndarray()
+        np.testing.assert_array_equal(y[0], expected[:height])
+
+
+def test_get_and_index_agree(reader, reference):
+    """Addressing a frame by time or by number must give the same pixels."""
+    packed, height = reference
+    times = reader.time
+    for idx in (0, 7, 42, 99):
+        by_index = reader[idx].result(timeout=RESULT_TIMEOUT)[0]
+        by_time = reader.get(times[idx]).result(timeout=RESULT_TIMEOUT)[0]
+        np.testing.assert_array_equal(by_time, by_index)
+        np.testing.assert_array_equal(by_index[0], packed[idx][:height])
+
+
+def test_get_supersedes_a_pending_index_request(reader, reference):
+    """get and __getitem__ share one buffer, so a new request cancels the old."""
+    packed, height = reference
+    stale = reader[0]
+    fresh = reader.get(reader.time[42])
+
+    y, _u, _v = fresh.result(timeout=RESULT_TIMEOUT)
+    np.testing.assert_array_equal(y[0], packed[42][:height])
+    assert stale.cancelled() or stale.done()
+
+
+def test_provided_time_is_used_for_get(video_path, reference):
+    """A supplied clock must reach the worker, not be silently dropped."""
+    packed, height = reference
+    offset = 100.0
+    times = np.arange(100) / 30.0 + offset
+
+    r = AsyncVideoReader(video_path, time=times)
+    try:
+        np.testing.assert_allclose(r.time, times)
+        # 100.5 s on this clock is frame 15
+        y, _u, _v = r.get(offset + 0.5).result(timeout=RESULT_TIMEOUT)
+        np.testing.assert_array_equal(y[0], packed[15][:height])
+    finally:
+        r.shutdown()
+
+
+def test_provided_time_wrong_length_raises(video_path):
+    """Rejected at construction here: the container declares its frame count."""
+    with pytest.raises(ValueError, match="one timestamp per frame"):
+        AsyncVideoReader(video_path, time=np.arange(90))
+
+
+def test_shutdown_without_reading_time_does_not_hang(video_path):
+    """The worker publishes the times whether or not anyone collects them.
+
+    A multiprocessing queue holding an unread array keeps its feeder thread
+    alive and can block the child at exit, which is why the worker calls
+    ``cancel_join_thread``.
+
+    Note this is a smoke test, not a regression test for that call: the fixture
+    has 100 frames, so the unread array is under a kilobyte and fits in the pipe
+    buffer, and the shutdown stays clean even without ``cancel_join_thread``.
+    Reproducing the hang needs an array too large for the buffer -- megabytes,
+    i.e. a video with hundreds of thousands of frames.
+    """
+    started = time.monotonic()
+    r = AsyncVideoReader(video_path)
+    r[10].result(timeout=RESULT_TIMEOUT)
+    r.shutdown()  # never touched r.time
+    assert time.monotonic() - started < RELEASE_TIMEOUT
+
+
+def test_pixel_format_is_not_accepted(video_path):
+    """Frames cross in the native format, so the decode format is not a choice."""
+    with pytest.raises(TypeError):
+        AsyncVideoReader(video_path, pixel_format="rgb24")
 
 
 # ---------------------------------------------------------------------------

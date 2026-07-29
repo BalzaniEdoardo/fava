@@ -89,7 +89,7 @@ Each reader owns a process, so remember to call `shutdown()` when you are done w
 Frame times rarely start at zero or fall on an exact grid, so pass `time=` — one timestamp per frame, from the acquisition system — and every lookup uses your clock rather than a frame rate guessed from the container:
 
 ```python
- from asyncvideo import VideoHandler
+from asyncvideo import VideoHandler
 from asyncvideo.fetch import fetch_times, fetch_video
 
 bout_start, bout_end = 124.0, 125.0   # a scored behavioural epoch, in session time
@@ -113,8 +113,8 @@ Video and other recorded signals — spike times, a behavioural trace — can th
 Note that `get_slice` returns a `slice`, not the frames. This is deliberate: a time range says nothing about how many frames it covers, so slicing straight by time risks materialising an enormous array. Ten minutes of 640x480 video at 30 fps is 18,000 frames, which is 16.6 GB as `rgb24`. Returning the slice first lets you inspect what you asked for before deciding to read it:
 
 ```python
-window = video.get_slice(0.0, 600.0)        # ten minutes
-print(window.stop - window.start)           # 18000 frames — probably not what you want
+window = video.get_slice(120.0, 130.0)      # the whole clip, ten seconds of it
+print(window.stop - window.start)           # check the size before reading
 
 bout = video[window]                        # nothing is decoded until this line
 ```
@@ -125,12 +125,11 @@ Issue every request before collecting any result. That is what makes the decodes
 
 ```python
 from asyncvideo import AsyncVideoReader
+from asyncvideo.fetch import fetch_video
 
-paths = ["cam_top.mp4", "cam_side.mp4", "cam_front.mp4"]
-readers = [AsyncVideoReader(p) for p in paths]
+readers = [AsyncVideoReader(fetch_video(cam)) for cam in ("left", "body", "right")]
 try:
-    frame_index = 4200
-    futures = [r[frame_index] for r in readers]   # all three decode at the same time
+    futures = [r[100] for r in readers]          # all three decode at the same time
     # to_rgb converts the reader's YUV output for display (see Pixel formats below)
     views = [r.to_rgb(f.result())[0] for r, f in zip(readers, futures)]
 finally:
@@ -138,20 +137,30 @@ finally:
         r.shutdown()
 ```
 
-Showing frame 4200 from three cameras therefore costs about as much as showing it from the slowest one, rather than the sum of all three.
+Showing one frame from three cameras therefore costs about as much as showing it from the slowest one, rather than the sum of all three.
 
 In practice the cameras have their own timestamps and need not share a frame rate, so one moment in the experiment is a *different frame index* in each view. Ask by time instead and there is no index to map:
 
 ```python
-# times: one timestamp per frame, from the acquisition system
-readers = {
-    label: AsyncVideoReader(path, time=times)
-    for label, (path, times) in cameras.items()
-}
+from asyncvideo import AsyncVideoReader
+from asyncvideo.fetch import fetch_times, fetch_video
 
-futures = {label: r.get(300.0) for label, r in readers.items()}   # t = 300 s in every view
-views = {label: readers[label].to_rgb(f.result())[0] for label, f in futures.items()}
+# each camera gets its own clock, so one timestamp means the same instant in all three
+readers = {
+    cam: AsyncVideoReader(fetch_video(cam), time=fetch_times(cam))
+    for cam in ("left", "body", "right")
+}
+try:
+    futures = {cam: r.get(124.5) for cam, r in readers.items()}
+    views = {cam: readers[cam].to_rgb(f.result())[0] for cam, f in futures.items()}
+finally:
+    for r in readers.values():
+        r.shutdown()
 ```
+
+The three cameras run at 60, 30 and 150 fps, so `t = 124.5 s` is frame **271**, **135** and **677** respectively — the arithmetic you would otherwise be doing by hand.
+
+![The same instant in three cameras](docs/images/ibl_multiview.png)
 
 [`examples/ibl_multiview.py`](examples/ibl_multiview.py) is a runnable version of this against a public [International Brain Laboratory](https://www.internationalbrainlab.com) session that records three cameras at 60, 30 and 150 fps. It needs the docs extra (`pip install -e ".[docs]"`) and downloads a few megabytes of example clips on first run.
 
@@ -195,8 +204,9 @@ The drawback is that plotting libraries do not accept YUV. To display a frame, c
 ```python
 import matplotlib.pyplot as plt
 from asyncvideo import VideoHandler
+from asyncvideo.fetch import fetch_video
 
-with VideoHandler("example.mp4", pixel_format="yuv420p") as video:
+with VideoHandler(fetch_video("left"), pixel_format="yuv420p") as video:
     plt.imshow(video.to_rgb(video[7]))
 ```
 
@@ -217,14 +227,15 @@ A single `yuv444p` frame is `(3, H, W)`, which is indistinguishable from a stack
 
 ### One shape caveat
 
-With the default `pixel_format=None`, `shape` reports the layout of `frame.to_ndarray()` in the stream's *native* format. For a 480x640 `yuv420p` video that is `(n, 720, 640)`, because the packed layout stacks the colour planes underneath the luma plane. `frame_shape` is `(480, 640)` either way:
+With the default `pixel_format=None`, `shape` reports the layout of `frame.to_ndarray()` in the stream's *native* format. For a 1024x1280 `yuv420p` video that is `(n, 1536, 1280)`, because the packed layout stacks the colour planes underneath the luma plane. `frame_shape` is `(1024, 1280)` either way:
 
 ```python
 from asyncvideo import VideoHandler
+from asyncvideo.fetch import fetch_video
 
-with VideoHandler("example.mp4") as video:      # pixel_format=None
-    print(video.shape)        # (100, 720, 640)  — packed Y + U + V
-    print(video.frame_shape)  # (480, 640)       — actual frame size
+with VideoHandler(fetch_video("left")) as video:   # pixel_format=None
+    print(video.shape)        # (601, 1536, 1280)  — packed Y + U + V
+    print(video.frame_shape)  # (1024, 1280)       — actual frame size
 ```
 
 ## Supported formats

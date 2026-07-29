@@ -68,7 +68,13 @@ def generate_numbered_video(
             ax.clear()
             ax.axis("off")
             ax.text(
-                0.5, 0.5, str(i), fontsize=60, ha="center", va="center", transform=ax.transAxes
+                0.5,
+                0.5,
+                str(i),
+                fontsize=60,
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
             )
 
             canvas.draw()
@@ -89,4 +95,6 @@ def generate_numbered_video(
 
 if __name__ == "__main__":
     for _codec, _ext in DEFAULT_COMBOS:
-        generate_numbered_video(base_name="numbered_video", extension=_ext, codec=_codec)
+        generate_numbered_video(
+            base_name="numbered_video", extension=_ext, codec=_codec
+        )

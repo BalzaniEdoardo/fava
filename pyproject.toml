@@ -31,7 +31,8 @@ docs = [
     "matplotlib",
     "fastplotlib",
     "glfw",  # windowing backend fastplotlib renders into
-    "ONE-api",  # fetches the public IBL session used by the examples
+    "pooch",  # downloads and hash-verifies the example clips
+    "tqdm",  # download progress bar
 ]
 
 [tool.setuptools.packages.find]

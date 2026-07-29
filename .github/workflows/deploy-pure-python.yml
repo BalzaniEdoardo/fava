@@ -1,0 +1,92 @@
+name: Build and upload to PyPI for pure python
+
+permissions: {}
+
+on:
+  release:
+    types: [published]
+  # lets you rehearse the build and its checks without publishing anything
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and test package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # full history so `git describe` can see the tags
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Build package
+        run: |
+          pip install build
+          python -m build --outdir dist/ --sdist --wheel
+
+      - name: Check there's only one sdist and one whl file created
+        shell: bash
+        # because the following checks would be ambiguous otherwise. using
+        # [[ BOOLEAN ]] || EXPR is a compact way of writing IF NOT BOOLEAN THEN EXPR
+        run: |
+          [[ $(find dist/ -type f -name "*whl" -printf x | wc -c) == 1 ]] || exit 1
+          [[ $(find dist/ -type f -name "*tar.gz" -printf x | wc -c) == 1 ]] || exit 1
+
+      - name: Check setuptools_scm version against git tag
+        shell: bash
+        # setuptools_scm derives the version from the tag, so these should always
+        # agree -- but a shallow clone or a missing tag would silently produce a
+        # dev version like 0.1.dev3+g1234567, and PyPI does not allow reuploads.
+        # =~ is bash's regex operator: succeed if the sdist name ends in the most
+        # recent tag, fail if it does not.
+        run: |
+          [[ "$(ls dist/*tar.gz)" =~ "-$(git describe --tags).tar.gz" ]]
+
+      - name: Install FFmpeg
+        # the test videos are encoded rather than committed
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install --no-install-recommends -y ffmpeg
+
+      - name: Check we can install from wheel
+        # we've checked there's only one .whl above, so the bit in `$()` expands to
+        # that single file. [dev] pulls the test dependencies, and the quotes stop
+        # bash interpreting the square brackets.
+        shell: bash
+        run: |
+          pip install "$(ls dist/*whl)[dev]"
+
+      - name: Generate test videos
+        # deliberately not `nox -s video_gen`: nox would build its own env and
+        # install the package from source, which would shadow the wheel we are
+        # meant to be testing.
+        run: python tests/generate_numbered_video.py
+
+      - name: Run the test suite against the installed wheel
+        run: pytest
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          path: dist/*
+
+  publish:
+    name: Upload release to PyPI
+    needs: [build]
+    # only a published release publishes; a manual run stops after the checks
+    if: github.event_name == 'release'
+    environment: pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
+    steps:
+      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+        with:
+          name: artifact
+          path: dist
+      - name: Publish package to pypi
+        uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0

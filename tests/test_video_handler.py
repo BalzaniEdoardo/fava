@@ -1,3 +1,5 @@
+import asyncio
+import concurrent.futures
 import pathlib
 
 import av
@@ -121,6 +123,125 @@ def test_video_shape_matches_returned_array(video_info, pixel_format):
     ) as video:
         frame = video[7]
         assert video.shape == (len(video), *frame.shape)
+
+
+# ---------------------------------------------------------------------------
+# Interleaving and concurrency
+#
+# Addressing a frame by number and by timestamp used to be switched by a flag on
+# a class-level ``threading.local``, shared by every handler that existed. These
+# tests pin the property that replaced it: the method you call decides how the
+# argument is read, so nothing is shared and interleaved or concurrent readers
+# cannot contaminate one another.
+#
+# Note what is deliberately *not* asserted: a single handler is not safe for
+# concurrent use. ``get`` mutates the buffer, the last-decoded index and the
+# stream position, and seeks the container -- two threads sharing one handler
+# would interleave those. Each test below gives every worker its own handler,
+# which is also what ``AsyncVideoReader`` does with a process per video.
+# ---------------------------------------------------------------------------
+
+# one codec is enough here: these test shared state, not container handling
+_ONE_CODEC = [CODEC_EXTENSION_COMBOS[1]]  # libx264/mp4
+
+
+@pytest.mark.parametrize("video_info", _ONE_CODEC, indirect=True)
+def test_get_and_getitem_agree(video_info):
+    """The two ways of addressing a frame must return the same frame.
+
+    This is the guarantee the flag existed to provide, now provided by ``get``
+    and ``__getitem__`` sharing ``_get_by_index``.
+    """
+    frame_array, _, _, video_path = video_info
+    times = np.arange(100, dtype=float)
+    with VideoHandler(video_path, time=times) as video:
+        for idx in (0, 1, 7, 42, 99):
+            by_index = video[idx]
+            by_time = video.get(times[idx])
+            np.testing.assert_array_equal(by_index.to_ndarray(), frame_array[idx])
+            np.testing.assert_array_equal(by_time.to_ndarray(), frame_array[idx])
+
+
+@pytest.mark.parametrize("video_info", _ONE_CODEC, indirect=True)
+def test_two_handlers_interleaved_in_one_thread(video_info):
+    """Alternating between two handlers must not let one affect the other.
+
+    The old flag lived on the class, so a handler reading by index could change
+    how another handler in the same thread read its argument.
+    """
+    frame_array, _, _, video_path = video_info
+    times = np.arange(100, dtype=float)
+    with (
+        VideoHandler(video_path, time=times) as a,
+        VideoHandler(video_path, time=times) as b,
+    ):
+        for idx in (5, 20, 60, 90):
+            # a reads by index, b reads the same frame by timestamp, alternating
+            np.testing.assert_array_equal(a[idx].to_ndarray(), frame_array[idx])
+            np.testing.assert_array_equal(
+                b.get(times[idx]).to_ndarray(), frame_array[idx]
+            )
+            # and back the other way round
+            np.testing.assert_array_equal(
+                a.get(times[idx]).to_ndarray(), frame_array[idx]
+            )
+            np.testing.assert_array_equal(b[idx].to_ndarray(), frame_array[idx])
+
+
+@pytest.mark.parametrize("video_info", _ONE_CODEC, indirect=True)
+def test_handlers_in_separate_threads(video_info):
+    """Handlers used concurrently from different threads stay independent."""
+    frame_array, _, _, video_path = video_info
+    times = np.arange(100, dtype=float)
+    indices = [3, 17, 44, 71, 98]
+
+    def read_all(by_time: bool):
+        # one handler per worker, opened inside the thread
+        with VideoHandler(video_path, time=times) as video:
+            out = []
+            for idx in indices:
+                frame = video.get(times[idx]) if by_time else video[idx]
+                out.append(frame.to_ndarray())
+            return out
+
+    # half the workers address frames by time, half by index, all at once
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(read_all, i % 2 == 0) for i in range(4)]
+        results = [f.result(timeout=120) for f in futures]
+
+    for frames in results:
+        for idx, frame in zip(indices, frames):
+            np.testing.assert_array_equal(frame, frame_array[idx])
+
+
+@pytest.mark.parametrize("video_info", _ONE_CODEC, indirect=True)
+def test_handlers_in_concurrent_async_tasks(video_info):
+    """Two tasks on one event loop, interleaved, must not contaminate each other.
+
+    This is the case ``threading.local`` could not have isolated: coroutines on a
+    single thread share thread-local state, so a flag set by one task would have
+    been visible to the other while it was suspended.
+    """
+    frame_array, _, _, video_path = video_info
+    times = np.arange(100, dtype=float)
+    indices = [2, 33, 64, 95]
+
+    async def read(by_time: bool):
+        with VideoHandler(video_path, time=times) as video:
+            out = []
+            for idx in indices:
+                frame = video.get(times[idx]) if by_time else video[idx]
+                out.append(frame.to_ndarray())
+                await asyncio.sleep(0)  # hand control to the other task
+            return out
+
+    async def main():
+        return await asyncio.gather(read(True), read(False))
+
+    by_time, by_index = asyncio.run(main())
+    for idx, (t_frame, i_frame) in zip(indices, zip(by_time, by_index)):
+        np.testing.assert_array_equal(t_frame, frame_array[idx])
+        np.testing.assert_array_equal(i_frame, frame_array[idx])
 
 
 # ---------------------------------------------------------------------------

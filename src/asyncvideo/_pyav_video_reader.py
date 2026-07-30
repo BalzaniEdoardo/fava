@@ -13,7 +13,6 @@ import threading
 import time
 from collections import deque
 from concurrent.futures import Future
-from contextlib import contextmanager
 from typing import Literal
 
 import av
@@ -123,13 +122,10 @@ def pyav_trim_plane(plane, bytes_per_pixel=1, dtype="uint8"):
 
 
 class BaseAudioVideo:
-    _thread_local = threading.local()
-
     def __init__(
         self,
         path: str | pathlib.Path,
     ) -> None:
-        self._thread_local.get_from_index = False
         self.file_path = pathlib.Path(path)
         self.container = av.open(path)
         self._running = True
@@ -264,8 +260,6 @@ class VideoHandler(BaseAudioVideo):
     >>> frame_sequence.shape  # doctest: +SKIP
     (5, 480, 640, 3)
     """
-
-    _thread_local = threading.local()
 
     def __init__(
         self,
@@ -423,20 +417,6 @@ class VideoHandler(BaseAudioVideo):
                     break
 
         return np.asarray(keyframe_pts), np.asarray(keyframe_timestamp, dtype=float)
-
-    @contextmanager
-    def _set_get_from_index(self, value):
-        """Context manager for setting the shallow copy flag in a thread safe way."""
-        # safe getattr is needed because the local variable is initialized
-        # with every thread, and a thread won't have `get_from_index` since
-        # in the main thread it is defined at __init__
-        # which is not called by the thread.
-        old_value = getattr(self._thread_local, "get_from_index", False)
-        self._thread_local.get_from_index = value
-        try:
-            yield
-        finally:
-            self._thread_local.get_from_index = old_value
 
     def _extract_keyframes_pts(self):
         try:
@@ -710,11 +690,19 @@ class VideoHandler(BaseAudioVideo):
         - Uses an internal cache: if the requested frame index matches the
           previously decoded one, the cached frame is returned.
         """
-        if not getattr(self._thread_local, "get_from_index", False):
-            idx = self._ts_to_index(ts, self.time)
-        else:
-            idx = ts
+        return self._get_by_index(self._ts_to_index(ts, self.time))
 
+    def _get_by_index(self, idx: int):
+        """
+        Return the frame at frame index ``idx``.
+
+        The shared body of `get` and ``__getitem__``: everything past resolving a
+        timestamp to an index is the same for both. Keeping it a separate method is
+        what lets ``__getitem__`` reuse it without having to tell `get` to
+        reinterpret its argument as an index -- which is state the two calls would
+        otherwise have to share, and which could not then be relied on across
+        threads or async tasks.
+        """
         if idx == self.last_loaded_idx:
             return (
                 self.current_frame.to_ndarray(format=self.pixel_format)
@@ -1139,20 +1127,19 @@ class VideoHandler(BaseAudioVideo):
                 return frames
 
         # Default case: single index
-        with self._set_get_from_index(True):
-            # TODO Check borders
-            idx_start = idx if not hasattr(idx, "start") else idx.start
-            n_frames = self._n_frames if self._n_frames is not None else self.shape[0]
-            idx_start = idx_start if idx_start >= 0 else n_frames + idx_start
-            frame = self.get(idx_start)
-            # handle slice requesting a single frame:
-            # for arrays add 1 dimension (1, pixel, pixel)
-            # for frames return a len 1 list.
-            if isinstance(idx, slice):
-                if isinstance(frame, np.ndarray):
-                    frame = np.expand_dims(frame, axis=0)
-                else:
-                    frame = [frame]
+        # TODO Check borders
+        idx_start = idx if not hasattr(idx, "start") else idx.start
+        n_frames = self._n_frames if self._n_frames is not None else self.shape[0]
+        idx_start = idx_start if idx_start >= 0 else n_frames + idx_start
+        frame = self._get_by_index(idx_start)
+        # handle slice requesting a single frame:
+        # for arrays add 1 dimension (1, pixel, pixel)
+        # for frames return a len 1 list.
+        if isinstance(idx, slice):
+            if isinstance(frame, np.ndarray):
+                frame = np.expand_dims(frame, axis=0)
+            else:
+                frame = [frame]
 
         # Apply spatial slices (height, width, channel) after decoding.
         # For a single frame (H, W, 3) index directly; for a stack

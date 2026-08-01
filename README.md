@@ -262,8 +262,15 @@ Support means *covered by the test suite*. `VideoHandler` is tested against ever
 | H.265 (`libx265`) | `.mp4` |
 | MPEG-4 (`mpeg4`) | `.mp4`, `.avi` |
 | VP9 (`vp9`) | `.webm` |
+| AV1 (`av1`) | `.mp4`, `.mkv`, `.webm` |
 
-Other codecs may work, since nothing here is codec-specific, but they are not verified. Codecs whose packet order differs from display order are the most likely to have seeking problems. AV1 is known not to work correctly yet. If you need a format that is not listed, please open an issue with a sample file.
+Other codecs may work, since nothing here is codec-specific, but they are not verified. Codecs whose packet order differs from display order are the most likely to have seeking problems. If you need a format that is not listed, please open an issue with a sample file.
+
+### Known limitations
+
+**AVI carries no presentation timestamps.** It stores only a frame counter, so a codec that reorders frames cannot be read back reliably from it — the display order simply is not recorded in the file, and no amount of demuxing recovers it. `mpeg4` in `.avi` is tested and works because that encoding does not reorder; H.264 in `.avi` does, and is not supported. This is a limitation of the container, not of this reader ([background](https://guru.multimedia.cx/avi-and-b-frames/)). Prefer `.mp4` or `.mkv`.
+
+**Streams that do not start at zero.** Video whose first frame has a large non-zero presentation timestamp — common in trimmed clips and transport-stream recordings — is not yet handled correctly and can return the wrong frame.
 
 ## License
 

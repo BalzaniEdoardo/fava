@@ -35,6 +35,9 @@ def video_gen(session):
             ("mpeg4", "avi"),
             ("vp9", "webm"),
             ("libx265", "mp4"),
+            ("av1", "mp4"),
+            ("av1", "mkv"),
+            ("av1", "webm"),
         ]
     ]
     # unevenly spaced frames, so tests can tell real timestamps apart from a

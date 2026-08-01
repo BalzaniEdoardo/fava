@@ -270,8 +270,6 @@ Other codecs may work, since nothing here is codec-specific, but they are not ve
 
 **AVI carries no presentation timestamps.** It stores only a frame counter, so a codec that reorders frames cannot be read back reliably from it — the display order simply is not recorded in the file, and no amount of demuxing recovers it. `mpeg4` in `.avi` is tested and works because that encoding does not reorder; H.264 in `.avi` does, and is not supported. This is a limitation of the container, not of this reader ([background](https://guru.multimedia.cx/avi-and-b-frames/)). Prefer `.mp4` or `.mkv`.
 
-**Streams that do not start at zero.** Video whose first frame has a large non-zero presentation timestamp — common in trimmed clips and transport-stream recordings — is not yet handled correctly and can return the wrong frame.
-
 ## License
 
 MIT — see [LICENSE](LICENSE).

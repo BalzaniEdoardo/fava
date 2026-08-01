@@ -8,6 +8,12 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 
 # (codec, extension) pairs to generate by default.
 # Covers both B-frame codecs (mpeg4, libx264) and non-B-frame codecs (vp9, libtheora).
+# "av1" resolves to whichever AV1 encoder PyAV was built with (libsvtav1 here). It
+# reorders frames with show_existing_frame OBUs rather than DTS != PTS, so one
+# packet can decode to two frames -- a case the other codecs here never produce.
+# It appears in three containers on purpose: mp4 declares a frame count while
+# mkv and webm report 0, which is the only coverage of reordering combined with
+# a frame count the reader has to discover for itself.
 DEFAULT_COMBOS = [
     ("mpeg4", "mp4"),
     ("libx264", "mp4"),
@@ -15,7 +21,16 @@ DEFAULT_COMBOS = [
     ("mpeg4", "avi"),
     ("vp9", "webm"),
     ("libx265", "mp4"),
+    ("av1", "mp4"),
+    ("av1", "mkv"),
+    ("av1", "webm"),
 ]
+
+# Per-codec keyframe interval, where the encoder default would leave the whole
+# clip in a single GOP. SVT-AV1 defaults to 161 frames, longer than the 100 we
+# encode, which would mean the seek-to-keyframe path is never exercised for the
+# one codec whose reordering makes seeking interesting.
+GOP_SIZES = {"av1": 30}
 
 
 def generate_numbered_video(
@@ -26,6 +41,7 @@ def generate_numbered_video(
     fps: int = 30,
     width: int = 640,
     height: int = 480,
+    gop_size: int | None = None,
 ):
     """Generate a test video where each frame displays its frame index.
 
@@ -47,6 +63,9 @@ def generate_numbered_video(
         Frame width in pixels.
     height:
         Frame height in pixels.
+    gop_size:
+        Keyframe interval. ``None`` leaves the encoder default, which for some
+        encoders is longer than ``num_frames`` and so yields a single keyframe.
     """
     output_path = (
         pathlib.Path(__file__).resolve().parent
@@ -60,6 +79,8 @@ def generate_numbered_video(
         stream.width = width
         stream.height = height
         stream.pix_fmt = "yuv420p"
+        if gop_size is not None:
+            stream.codec_context.gop_size = gop_size
 
         fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=100)
         canvas = FigureCanvas(fig)
@@ -182,6 +203,9 @@ def generate_variable_rate_video(
 if __name__ == "__main__":
     for _codec, _ext in DEFAULT_COMBOS:
         generate_numbered_video(
-            base_name="numbered_video", extension=_ext, codec=_codec
+            base_name="numbered_video",
+            extension=_ext,
+            codec=_codec,
+            gop_size=GOP_SIZES.get(_codec),
         )
     generate_variable_rate_video()

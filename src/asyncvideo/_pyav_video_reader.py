@@ -278,6 +278,13 @@ class VideoHandler(BaseAudioVideo):
         # True once the stream has been decoded to exhaustion: the decoder is
         # flushed and must be re-seeked before it will accept another packet
         self._at_eof = False
+        # Frame-level iterator over the stream, kept alive between reads and
+        # dropped only by ``_seek``. It has to outlive a single read: a packet
+        # can decode to more than one frame (AV1 reorders with
+        # show_existing_frame OBUs rather than DTS != PTS, so libdav1d emits two
+        # frames from one packet), and a generator abandoned after the first of
+        # those frames takes the rest with it.
+        self._decoder = None
         self.stream = self.container.streams.video[stream_index]
         self.stream_index = stream_index
         self.pixel_format = pixel_format
@@ -644,6 +651,10 @@ class VideoHandler(BaseAudioVideo):
                 any_frame=False,
                 stream=self.stream,
             )
+        # This seeks and then demuxes by hand, so the shared iterator no longer
+        # describes where the stream is.
+        self._at_eof = False
+        self._decoder = None
 
         # Decode the next frame, which should be a keyframe
         frame = next(
@@ -755,6 +766,15 @@ class VideoHandler(BaseAudioVideo):
             int(target_pts), backward=True, any_frame=False, stream=self.stream
         )
         self._at_eof = False
+        # Frames still queued in the old iterator belong to the position we just
+        # left, so the iterator goes with it.
+        self._decoder = None
+
+    def _frames(self):
+        """The live frame iterator, opened on first use after a seek."""
+        if self._decoder is None:
+            self._decoder = self.container.decode(self.stream)
+        return self._decoder
 
     def _decode_and_check_frames(self, use_time: bool, target_pts: int, idx: int):
         """Decode from stream, recovering once if the decoder is already at EOF."""
@@ -776,7 +796,7 @@ class VideoHandler(BaseAudioVideo):
         frame_duration = 1 / float(self.stream.average_rate)
         time_threshold = self.round_fn(idx * frame_duration)
 
-        for frame in self.container.decode(self.stream):
+        for frame in self._frames():
             if frame.pts is None:
                 continue
             if (not use_time and frame.pts > target_pts) or (
@@ -799,6 +819,9 @@ class VideoHandler(BaseAudioVideo):
         # arrive in decode order rather than display order. Record it: the next
         # decode must re-seek first or PyAV raises EOFError.
         self._at_eof = True
+        # An exhausted iterator yields nothing forever; drop it so the re-seek
+        # opens a fresh one rather than silently finding no frames.
+        self._decoder = None
         return last_idx, preceding_frame
 
     @property
@@ -981,7 +1004,10 @@ class VideoHandler(BaseAudioVideo):
 
         preceding_frame = self.current_frame
         last_frame = self.current_frame
-        decoder = None  # frame-level iterator; reset after every seek
+        # The first target is seeked to unconditionally, as before; from then on
+        # the shared iterator carries the position (and any queued frames)
+        # forward, including past the end of this call.
+        seeked = False
 
         while collected < num_frames:
             # check buffer first
@@ -997,20 +1023,20 @@ class VideoHandler(BaseAudioVideo):
 
             target_pts, use_time = self._get_target_frame_pts(indices[collected])
 
-            # Open a decoder (or re-open after a seek) when needed.
-            if decoder is None or (self._need_seek_call(self._stream_pts, target_pts)):
-                self.container.seek(
-                    int(target_pts), backward=True, any_frame=False, stream=self.stream
-                )
-                decoder = self.container.decode(self.stream)
+            # Seek when the target is behind us or past a nearer keyframe.
+            if not seeked or self._need_seek_call(self._stream_pts, target_pts):
+                self._seek(target_pts)
+                seeked = True
 
             # Advance one frame. container.decode handles B-frame buffering
             # internally, so zero-frame packets are transparent to us.
             try:
-                frame = next(f for f in decoder if f.pts is not None)
+                frame = next(f for f in self._frames() if f.pts is not None)
                 self._buffer.put(self._get_frame_idx(frame.pts)[0], frame)
                 self._stream_pts = frame.pts
             except StopIteration:
+                self._at_eof = True
+                self._decoder = None
                 break
 
             time_threshold = time_threshold_all[collected]
@@ -1106,12 +1132,7 @@ class VideoHandler(BaseAudioVideo):
                 if self._stream_pts is None or self._need_seek_call(
                     self._stream_pts, target_pts
                 ):
-                    self.container.seek(
-                        int(target_pts),
-                        backward=True,
-                        any_frame=False,
-                        stream=self.stream,
-                    )
+                    self._seek(target_pts)
 
                 frame_idx, frames, last_frame = self._decode_multiple(
                     start, stop, step=step

@@ -24,6 +24,7 @@ DEFAULT_COMBOS = [
     ("av1", "mp4"),
     ("av1", "mkv"),
     ("av1", "webm"),
+    ("mpeg2video", "mpg"),
 ]
 
 # Per-codec keyframe interval, where the encoder default would leave the whole

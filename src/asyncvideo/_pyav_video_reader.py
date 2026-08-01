@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # B-frames (where packet PTS are already in display order).
 _INDEX_FLUSH_EVERY = 64
 
+# How many progressively earlier restarts to try when a seek lands past the frame
+# that was asked for. Each one rewinds a further keyframe, so a small number
+# covers the realistic cases without turning one bad seek into a scan of the
+# whole file.
+_MAX_REWINDS = 3
+
 
 class FrameBuffer:
     """Fixed-size FIFO cache mapping frame index → raw av.VideoFrame.
@@ -790,7 +796,112 @@ class VideoHandler(BaseAudioVideo):
             return self._scan_for_frame(use_time, target_pts, idx)
 
     def _scan_for_frame(self, use_time: bool, target_pts: int, idx: int):
-        """Decode forward from the current position looking for ``target_pts``."""
+        """Decode forward to ``target_pts``, restarting earlier if it is missed.
+
+        ``container.seek`` is not exact in every container. MPEG program and
+        transport streams (``.mpg``, ``.ts``) ignore the ``backward`` flag:
+        FFmpeg seeks to the timestamp itself rather than to the keyframe before
+        it, and since that position is mid-GOP the first frame the decoder can
+        emit belongs to the *next* keyframe -- past what was asked for. The call
+        reports success either way, so a late seek can only be recognised from
+        what comes back. mp4, mkv and webm honour the flag, so for those the
+        first pass always succeeds and nothing below the first line runs.
+
+        Restarting one keyframe further back at a time is the workaround the
+        FFmpeg mailing list recommends for these containers: seek behind the
+        target, then decode forward to it. The list of restart points is finite,
+        so a target that genuinely cannot be reached ends the loop instead of
+        retrying forever.
+        """
+        last_idx, frame, missed = self._scan_once(use_time, target_pts, idx)
+        if not missed:
+            return last_idx, frame
+
+        rewind_points = self._rewind_points(target_pts)
+        for rewind_pts in rewind_points:
+            self._seek(rewind_pts)
+            # Each restart point sits one tick before a keyframe, so that keyframe
+            # is what the decoder must hand back first. Insisting on it is what
+            # makes the retry worth doing: the same containers that seek late also
+            # mislabel timestamps afterwards, handing back a frame carrying the
+            # target's pts but decoded from the wrong reference. Landing anywhere
+            # else means this restart point is unusable, not that the frame is.
+            last_idx, frame, missed = self._scan_once(
+                use_time, target_pts, idx, expect_keyframe_pts=rewind_pts + 1
+            )
+            if not missed:
+                return last_idx, frame
+
+        # Out of restart points. Hand back the closest frame found rather than
+        # raising -- but say so, because the answer is not the frame requested
+        # and silently returning the wrong one is the failure this guards.
+        logger.warning(
+            "could not reach pts %s for frame %s in %s after %d restarts; "
+            "returning the nearest frame decoded",
+            target_pts,
+            idx,
+            self.file_path.name,
+            len(rewind_points),
+        )
+        return last_idx, frame
+
+    def _publish_decoded(self, frame: av.VideoFrame) -> None:
+        """Cache a freshly decoded frame and record it as the read position."""
+        self._buffer.put(self._get_frame_idx(frame.pts)[0], frame)
+        self._stream_pts = frame.pts
+
+    def _recover_frame(self, use_time: bool, target_pts: int, idx: int):
+        """Re-acquire the frame for ``idx`` after the read position went wrong.
+
+        Shares the single-frame path's recovery, then republishes the position so
+        a surrounding loop can carry on streaming from where this left off.
+        """
+        _, frame = self._decode_and_check_frames(use_time, target_pts, idx)
+        if frame is not None:
+            self._publish_decoded(frame)
+        return frame
+
+    def _rewind_points(self, target_pts: int) -> list[int]:
+        """Restart timestamps to try, each one keyframe further back.
+
+        One tick *before* each keyframe rather than the keyframe itself: where
+        the backward flag is ignored, asking for a keyframe's own timestamp is
+        exactly what overshoots it, while asking for the tick before it lands on
+        it. The stream start is always the final fallback, since decoding from
+        there cannot miss a frame that exists.
+        """
+        with self._lock:
+            earlier = {int(k) for k in self._keyframe_pts if k <= target_pts}
+        points = [k - 1 for k in sorted(earlier, reverse=True)][: _MAX_REWINDS - 1]
+        start = int(self.stream.start_time or 0) - 1
+        if start not in points:
+            points.append(start)
+        return points
+
+    def _scan_once(
+        self,
+        use_time: bool,
+        target_pts: int,
+        idx: int,
+        expect_keyframe_pts: int | None = None,
+    ):
+        """Decode forward from wherever the stream is, looking for ``target_pts``.
+
+        One pass, no seeking: `_scan_for_frame` owns the retrying. Returns the
+        frame found and whether the pass *missed* the target because the stream
+        was in the wrong place. Three ways that happens, all meaning the read
+        position is wrong rather than the frame absent:
+
+        - the first frame the decoder produced was already past the target, so
+          there was nothing at or before it to return;
+        - the stream ran out before the target was ever reached;
+        - ``expect_keyframe_pts`` was given and the decoder did not open on that
+          keyframe, so everything decoded after it is referenced against the
+          wrong picture even where the timestamps look right.
+
+        Returning the frame just *before* the target is not a miss: that is the
+        intended answer when a timestamp falls between two frames.
+        """
         preceding_frame = None
         last_idx = self.last_loaded_idx
         frame_duration = 1 / float(self.stream.average_rate)
@@ -799,18 +910,22 @@ class VideoHandler(BaseAudioVideo):
         for frame in self._frames():
             if frame.pts is None:
                 continue
+            if expect_keyframe_pts is not None:
+                if not frame.key_frame or frame.pts != expect_keyframe_pts:
+                    return last_idx, None, True
+                expect_keyframe_pts = None
             if (not use_time and frame.pts > target_pts) or (
                 use_time and frame.time > time_threshold
             ):
                 last_idx = idx
                 current_frame = preceding_frame or frame
-                return last_idx, current_frame
+                return last_idx, current_frame, preceding_frame is None
             elif (not use_time and frame.pts == target_pts) or (
                 use_time and frame.time == time_threshold
             ):
                 last_idx = idx
                 current_frame = frame
-                return last_idx, current_frame
+                return last_idx, current_frame, False
             preceding_frame = frame
 
         # Falling out of the loop means the generator was exhausted, so the
@@ -822,7 +937,14 @@ class VideoHandler(BaseAudioVideo):
         # An exhausted iterator yields nothing forever; drop it so the re-seek
         # opens a fresh one rather than silently finding no frames.
         self._decoder = None
-        return last_idx, preceding_frame
+        # Running out before reaching the target is the other shape of a late
+        # seek: it puts the read position past the target's own GOP, so the
+        # frames that would have matched were never decoded. Distinguish that
+        # from legitimately stopping at the last frame of the stream.
+        missed = preceding_frame is None or (
+            not use_time and preceding_frame.pts < target_pts
+        )
+        return last_idx, preceding_frame, missed
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -1027,32 +1149,51 @@ class VideoHandler(BaseAudioVideo):
             if not seeked or self._need_seek_call(self._stream_pts, target_pts):
                 self._seek(target_pts)
                 seeked = True
+                # Whatever was decoded before the seek describes the position we
+                # just left, so it is not a candidate answer for anything after
+                # it -- and its absence is what marks a seek that landed late.
+                preceding_frame = None
 
             # Advance one frame. container.decode handles B-frame buffering
             # internally, so zero-frame packets are transparent to us.
             try:
                 frame = next(f for f in self._frames() if f.pts is not None)
-                self._buffer.put(self._get_frame_idx(frame.pts)[0], frame)
-                self._stream_pts = frame.pts
             except StopIteration:
                 self._at_eof = True
                 self._decoder = None
-                break
+                frame = None
 
             time_threshold = time_threshold_all[collected]
-            found_next = (
+            passed_target = frame is not None and (
                 (frame.pts > target_pts)
                 if not use_time
                 else (frame.time > time_threshold)
             )
+
+            # Same late seek the single-frame path handles: either the stream ran
+            # out before the target, or the first frame after the seek was already
+            # past it with nothing before it to fall back on. Both mean the read
+            # position is wrong rather than the frame missing, so recover this one
+            # index the same way and carry on streaming from there.
+            if frame is None or (passed_target and preceding_frame is None):
+                frame = self._recover_frame(use_time, target_pts, indices[collected])
+                if frame is None:
+                    break
+                self._append_frame(frames, collected, frame)
+                collected += 1
+                last_frame = preceding_frame = frame
+                continue
+
+            self._publish_decoded(frame)
+
             found_current = (
                 (frame.pts == target_pts)
                 if not use_time
                 else (frame.time == time_threshold)
             )
 
-            if found_next:
-                frame = preceding_frame or frame
+            if passed_target:
+                frame = preceding_frame
                 self._append_frame(frames, collected, frame)
                 collected += 1
             elif found_current:

@@ -263,8 +263,16 @@ Support means *covered by the test suite*. `VideoHandler` is tested against ever
 | MPEG-4 (`mpeg4`) | `.mp4`, `.avi` |
 | VP9 (`vp9`) | `.webm` |
 | AV1 (`av1`) | `.mp4`, `.mkv`, `.webm` |
+| MPEG-2 (`mpeg2video`) | `.mpg` |
 
 Other codecs may work, since nothing here is codec-specific, but they are not verified. Codecs whose packet order differs from display order are the most likely to have seeking problems. If you need a format that is not listed, please open an issue with a sample file.
+
+Two of these needed the reader to stop trusting things a container claims, which is worth knowing if you hit an unlisted format that misbehaves:
+
+- **AV1** reorders frames with `show_existing_frame` OBUs rather than by giving packets a decode order different from their display order. One packet can therefore decode to two frames, so the reader keeps a single decoder open across reads instead of opening one per read.
+- **MPEG-2 in `.mpg`** seeks inexactly. FFmpeg ignores the "seek to the keyframe at or before this timestamp" request for MPEG program and transport streams, and can also report the wrong timestamp on the frames that follow a seek. The reader checks that a seek landed where it asked and restarts further back when it did not, rather than trusting the position it was given.
+
+If you read a format that is not in the table and the frames come back wrong — duplicated, out of order, or simply not the frame you asked for — please [open an issue](https://github.com/BalzaniEdoardo/asyncvideo/issues) with a sample file. Wrong frames are easy to miss, because a reader that mishandles a container usually returns a real frame rather than failing, so a report with a file to reproduce from is genuinely the useful thing.
 
 ### Known limitations
 

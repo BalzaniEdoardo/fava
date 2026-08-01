@@ -23,6 +23,7 @@ CODEC_EXTENSION_COMBOS = [
     pytest.param(("av1", "mp4"), id="av1_mp4"),
     pytest.param(("av1", "mkv"), id="av1_mkv"),
     pytest.param(("av1", "webm"), id="av1_webm"),
+    pytest.param(("mpeg2video", "mpg"), id="mpeg2video_mpg"),
 ]
 
 
